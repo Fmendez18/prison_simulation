@@ -1,18 +1,63 @@
+"""
+prison_simulation.py
+
+Prison Economy, Concurrent Simulation
+OS & Parallel Computing, Group Project
+
+Time Scale
+
+  10 real seconds = 1 prison day  =  300 s total = 30 prison days
+
+Thread Model  (Session 2 — one thread per autonomous actor)
+
+  1 thread per inmate     — behaviour driven by reputation + randomness
+  1 thread per guard      — patrols; can be bribed
+  1 thread per gang       — recruits, fights, taxes members
+  1 event-scheduler       — fires riots, inspections, visitations
+
+Critical Regions  (Session 4 — shared resources that MUST be locked)
+
+  Location occupancy  -> threading.Lock per Location
+  Inmate inventory    -> threading.Lock per Inmate  (lower-ID-first, prevents deadlock)
+  Inmate reputation   -> threading.Lock per Inmate  (lower-ID-first)
+  Solitary queue      -> single solitary_lock
+  SQLite writes       -> single db_lock  (inside Singleton EventLogger)
+
+Intentionally NOT locked  (read-only, no state change)
+
+  Reading inmate.current_loc for display / targeting
+  Reading reputation for probability calculations
+  Individual sleep timers
+
+Design Patterns  (Session 24)
+
+  Singleton — EventLogger: one thread-safe SQLite writer across all threads
+  State — InmateState: Free, Solitary, Parole, Riot, Infirmary
+  Chain of Responsibility — Fight consequences: Kill, Injure, Solitary, Sentence
+  Proxy — GuardProxy: intercepts location entry; enforces bribe/inspection
+
+Verified Constraints
+
+  1. Fight duration    : 2–6 seconds          (duration_ms in events table)
+  2. Location capacity : never exceeded        (capacity_snapshots, every 1 s)
+  3. Solitary sentence : served before re-entry (solitary_start/release timestamps)
+"""
+
 import threading, sqlite3, random, time, os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod
- 
-# ─────────────────────────────────────────────────────────────────
+
 # CONFIGURATION
-# ─────────────────────────────────────────────────────────────────
+
+
 SIM_DURATION = 300          # 300 s real = 30 prison days
 DAY_LEN      = 10           # 10 real seconds = 1 prison day
 NUM_INMATES  = 15
 NUM_GUARDS   = 3
 NUM_GANGS    = 3
 DB_PATH      = "prison_events.db"
- 
+
 LOCATION_CAPS = {
     "cell_block": 20, "cafeteria": 15, "courtyard": 15,
     "gym": 10, "showers": 8, "workshop": 8,
@@ -20,4 +65,16 @@ LOCATION_CAPS = {
 }
 CONTRABAND  = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
 WEAPONS     = {"shiv"}
-ETHNICITIES = ["northside", "southside", "eastblock"]
+ETHNICITIES = ["black", "white", "asian", "hispanic"]
+
+NAMES_BY_ETH = {
+    "black":    ["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
+                 "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
+    "white":    ["Cody", "Travis", "Garrett", "Dustin", "Wade",
+                 "Colton", "Brayden", "Chet", "Ricky", "Dale"],
+    "asian":    ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
+                 "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
+    "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
+                 "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
+}
+
