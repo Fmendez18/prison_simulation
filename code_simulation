@@ -154,7 +154,7 @@ class Location:
 @dataclass
 class Inmate:
     id: int; name: str; ethnicity: str
-    reputation: float        # 0.0 = calm  →  1.0 = violent
+    reputation: float        # 0.0 = calm  ->  1.0 = violent
     sentence_days: int
     gang_id:   Optional[int] = None
     inventory: List[str] = field(default_factory=list)
@@ -256,3 +256,86 @@ class SolitaryState(InmateState):
         return "idle"
 
 
+class ParoleState(InmateState):
+    """Violent actions suppressed, inmate trying to behave."""
+    _BLOCKED = {"fight", "smuggle", "escape"}
+    def choose_action(self, inmate):
+        a = FreeState().choose_action(inmate)
+        return "idle" if a in self._BLOCKED else a
+
+
+class RiotState(InmateState):
+    """Chaos: fight, loot, or idle only."""
+    def choose_action(self, inmate):
+        return random.choice(["fight", "loot", "idle"])
+
+
+class InfirmaryState(InmateState):
+    """Recovering. Transitions to Free when timer expires."""
+    def choose_action(self, inmate):
+        if time.time() >= inmate.recovery_until:
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+        return "idle"
+
+
+
+# DESIGN PATTERN 3, Chain of responsibility: Fight consequences
+#
+# Each handler checks one condition. If it acts, it may stop the
+# chain (return). Otherwise it calls super().handle() to pass on.
+# Built once as FIGHT_CHAIN; reused by every fight.
+
+class FightHandler(ABC):
+    _next: "FightHandler" = None
+
+    def set_next(self, h):
+        self._next = h; return h
+
+    def handle(self, winner, loser, ctx):
+        if self._next: self._next.handle(winner, loser, ctx)
+
+
+class KillHandler(FightHandler):
+    """Loser may be killed, chain stops if so."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.05 + (0.05 if ctx.get("armed") else 0):
+            loser.alive = False
+            ctx["done"] = True
+            _upd_rep(winner, +0.10)
+            EventLogger().log(loser.id, "killed", loser.current_loc, f"by={winner.name}")
+            print(f"    [KILLED]    {loser.name} killed by {winner.name}.")
+            return
+        super().handle(winner, loser, ctx)
+
+
+class InjuryHandler(FightHandler):
+    """Loser may go to infirmary."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.20:
+            _to_infirmary(loser, random.randint(20, 40))
+            ctx["done"] = True
+            return
+        super().handle(winner, loser, ctx)
+
+
+class SolitaryHandler(FightHandler):
+    """Loser may be sent to solitary confinement."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.45:
+            _to_solitary(loser, random.randint(20, 40), "lost_fight")
+        super().handle(winner, loser, ctx)
+
+
+class SentenceHandler(FightHandler):
+    """Winner may receive an added sentence for instigating."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.20:
+            n = random.randint(1, 5)
+            winner.sentence_days += n
+            EventLogger().log(winner.id, "sentence_added", outcome=f"+{n}d")
+
+# Build the chain once at module level
+_chain = KillHandler()
+_chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
+FIGHT_CHAIN = _chain
