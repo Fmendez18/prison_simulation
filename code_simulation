@@ -339,3 +339,79 @@ class SentenceHandler(FightHandler):
 _chain = KillHandler()
 _chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
 FIGHT_CHAIN = _chain
+
+
+# Design Pattern #4 Proxy: GuardProxy
+
+# All movement routes through PROXY.enter(inmate, location).
+# The inmate code never knows whether a guard check occurred.
+# The proxy runs the inspection and only then delegates to the
+# real LocationAccess object.
+
+# This also demonstrates the critical region for location occupancy:
+# new_loc.lock acquired first, then old_loc.lock nested inside.
+# Always new-outer/old-inner, this prevents deadlock.
+
+class LocationAccess:
+    """Real subject, capacity-checked location move."""
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        if loc_name not in locs:
+            return False
+        new_loc = locs[loc_name]
+        old_loc = locs.get(inmate.current_loc)
+        if old_loc is new_loc:
+            return True
+        with new_loc.lock:                       # CRITICAL REGION: new outer
+            if len(new_loc.occupants) >= new_loc.capacity:
+                return False
+            if old_loc:
+                with old_loc.lock:               # nested: old inner
+                    if inmate.id in old_loc.occupants:
+                        old_loc.occupants.remove(inmate.id)
+            new_loc.occupants.append(inmate.id)
+            inmate.current_loc = loc_name
+            return True
+
+
+class GuardProxy(LocationAccess):
+    """
+    Proxy intercepts entry requests.
+    - Guard present + bribed  -> allow through, log the pass
+    - Guard present + active  -> inspect first; block if solitary triggered
+    - No guard / corrupt -> delegate straight to LocationAccess
+    """
+    _real = LocationAccess()
+
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        guard = next(
+            (g for g in guards.values() if g.current_loc == loc_name),
+            None)
+
+        if guard:
+            if guard.bribed:
+                EventLogger().log(inmate.id, "bribed_entry", loc_name, guard.name)
+            elif not guard.corrupt:
+                _inspect(guard, inmate)
+                if isinstance(inmate.state, SolitaryState):
+                    return False              # inspection sent them to solitary
+
+        return self._real.enter(inmate, loc_name)
+
+
+PROXY = GuardProxy()
+
+
+
+# Helpers
+
+def _enter_loc(inmate, loc_name):
+    """All movement routes through the Proxy."""
+    return PROXY.enter(inmate, loc_name)
+
+
+def _upd_rep(inmate, delta):
+    """Atomic reputation update. CRITICAL REGION: rep_lock."""
+    with inmate.rep_lock:
+        inmate.reputation = max(0.0, min(1.0, inmate.reputation + delta))
+
+
