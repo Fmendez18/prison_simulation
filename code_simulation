@@ -29,7 +29,7 @@ Intentionally NOT locked  (read-only, no state change)
   Reading reputation for probability calculations
   Individual sleep timers
 
-Design Patterns  (Session 24)
+Design Patterns
 
   Singleton — EventLogger: one thread-safe SQLite writer across all threads
   State — InmateState: Free, Solitary, Parole, Riot, Infirmary
