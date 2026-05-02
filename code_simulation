@@ -6,16 +6,16 @@ OS & Parallel Computing, Group Project
 
 Time Scale
 
-  10 real seconds = 1 prison day  =  300 s total = 30 prison days
+  10 real seconds = 1 prison day  =  300 seconds total = 30 prison days
 
-Thread Model  (Session 2 — one thread per autonomous actor)
+Thread Model
 
   1 thread per inmate     — behaviour driven by reputation + randomness
   1 thread per guard      — patrols; can be bribed
   1 thread per gang       — recruits, fights, taxes members
   1 event-scheduler       — fires riots, inspections, visitations
 
-Critical Regions  (Session 4 — shared resources that MUST be locked)
+Critical Regions  
 
   Location occupancy  -> threading.Lock per Location
   Inmate inventory    -> threading.Lock per Inmate  (lower-ID-first, prevents deadlock)
@@ -31,10 +31,10 @@ Intentionally NOT locked  (read-only, no state change)
 
 Design Patterns
 
-  Singleton — EventLogger: one thread-safe SQLite writer across all threads
-  State — InmateState: Free, Solitary, Parole, Riot, Infirmary
-  Chain of Responsibility — Fight consequences: Kill, Injure, Solitary, Sentence
-  Proxy — GuardProxy: intercepts location entry; enforces bribe/inspection
+  Singleton: EventLogger: one thread-safe SQLite writer across all threads
+  State: InmateState: Free, Solitary, Parole, Riot, Infirmary
+  Chain of Responsibility: Fight consequences: Kill, Injure, Solitary, Sentence
+  Proxy: GuardProxy: intercepts location entry; enforces bribe/inspection
 
 Verified Constraints
 
@@ -205,11 +205,11 @@ shutdown = threading.Event()
 riot_active = False
 lockdown = False
 
-# DESIGN PATTERN 2 — STATE: InmateState hierarchy
+# Design Pattern 2: State: InmateState hierarchy
 
 # The main inmate loop never checks flags directly.
 # It calls inmate.state.choose_action() and the correct state object
-# decides what to do — Free acts normally, Solitary waits, etc.
+# decides what to do, Free acts normally, Solitary waits, etc.
 # Transitions: inmate.set_state(NewState())  (Session 24 — State)
 
 class InmateState(ABC):
