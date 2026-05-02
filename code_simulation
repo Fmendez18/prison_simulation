@@ -78,3 +78,51 @@ NAMES_BY_ETH = {
                  "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
 }
 
+# Design pattern #1: Singleton: EventLogger
+# Ensures exactly one SQLite connection exists across all threads.
+# Uses double-checked locking for thread-safe creation.
+# Every write acquires _lock, which is the critical region for the database.
+class EventLogger:
+    _inst      = None
+    _meta_lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._inst is None:
+            with cls._meta_lock:                 # outer check avoids lock cost
+                if cls._inst is None:            # inner check prevents race
+                    o = super().__new__(cls)
+                    o._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+                    o._lock = threading.Lock()
+                    o._conn.executescript("""
+                        CREATE TABLE IF NOT EXISTS events(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, event_type TEXT,
+                            location TEXT, outcome TEXT, duration_ms INTEGER);
+                        CREATE TABLE IF NOT EXISTS capacity_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            location TEXT, occupancy INTEGER, capacity INTEGER);
+                        CREATE TABLE IF NOT EXISTS reputation_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, reputation REAL);
+                    """)
+                    o._conn.commit()
+                    cls._inst = o
+        return cls._inst
+
+    def log(self, iid, etype, loc=None, outcome=None, ms=None):
+        with self._lock:                         # CRITICAL REGION: DB write
+            self._conn.execute(
+                "INSERT INTO events(timestamp,inmate_id,event_type,location,outcome,duration_ms)"
+                " VALUES(?,?,?,?,?,?)",
+                (time.time(), iid, etype, loc, outcome, ms))
+            self._conn.commit()
+
+    def snap_capacity(self, all_locs):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO capacity_snapshots(timestamp,location,occupancy,capacity)"
+                " VALUES(?,?,?,?)",
+                [(t, l.name, len(l.occupants), l.capacity) for l in all_locs])
+            self._conn.commit()
+
