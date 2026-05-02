@@ -1,0 +1,23 @@
+import threading, sqlite3, random, time, os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from abc import ABC, abstractmethod
+ 
+# ─────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────
+SIM_DURATION = 300          # 300 s real = 30 prison days
+DAY_LEN      = 10           # 10 real seconds = 1 prison day
+NUM_INMATES  = 15
+NUM_GUARDS   = 3
+NUM_GANGS    = 3
+DB_PATH      = "prison_events.db"
+ 
+LOCATION_CAPS = {
+    "cell_block": 20, "cafeteria": 15, "courtyard": 15,
+    "gym": 10, "showers": 8, "workshop": 8,
+    "garden": 8, "basketball_court": 10,
+}
+CONTRABAND  = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
+WEAPONS     = {"shiv"}
+ETHNICITIES = ["northside", "southside", "eastblock"]
