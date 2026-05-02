@@ -140,31 +140,31 @@ class EventLogger:
             return self._conn.execute(sql).fetchall()
 
 
-# ─────────────────────────────────────────────────────────────────
+
 # DATA MODELS
-# ─────────────────────────────────────────────────────────────────
+
 @dataclass
 class Location:
     name: str; capacity: int
-    occupants: List[int]     = field(default_factory=list)
-    lock: threading.Lock     = field(default_factory=threading.Lock)
+    occupants: List[int] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
     gang_ctrl: Optional[int] = None
 
 
 @dataclass
 class Inmate:
     id: int; name: str; ethnicity: str
-    reputation: float        # 0.0 = calm  →  1.0 = violent
+    reputation: float        # 0.0 = calm  ->  1.0 = violent
     sentence_days: int
     gang_id:   Optional[int] = None
-    inventory: List[str]     = field(default_factory=list)
-    alive:     bool          = True
-    escaped:   bool          = False
-    debt:      int           = 0
-    current_loc: str         = "cell_block"
-    solitary_until: float    = 0.0
-    recovery_until: float    = 0.0
-    state: "InmateState"     = None
+    inventory: List[str] = field(default_factory=list)
+    alive: bool = True
+    escaped: bool = False
+    debt: int = 0
+    current_loc: str  = "cell_block"
+    solitary_until: float = 0.0
+    recovery_until: float = 0.0
+    state: "InmateState" = None
     inv_lock: threading.Lock = field(default_factory=threading.Lock)
     rep_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -178,20 +178,240 @@ class Inmate:
 @dataclass
 class Guard:
     id: int; name: str
-    corrupt:     bool  = False
-    bribed:      bool  = False
+    corrupt: bool  = False
+    bribed: bool  = False
     bribe_until: float = 0.0
-    current_loc: str   = "cell_block"
+    current_loc: str = "cell_block"
 
 
 @dataclass
 class Gang:
     id: int; name: str; ethnicity: str
-    members:  List[int]      = field(default_factory=list)
-    treasury: int            = 0
-    lock: threading.Lock     = field(default_factory=threading.Lock)
+    members: List[int] = field(default_factory=list)
+    treasury: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-# ─────────────────────────────────────────────────────────────────
 # GLOBAL STATE
-# ─────────────────────────────────────────────────────────────────
+
+locs: Dict[str, Location] = {}
+inmates: Dict[int, Inmate] = {}
+guards: Dict[int, Guard] = {}
+gangs: Dict[int, Gang] = {}
+
+solitary_q = []
+solitary_lock = threading.Lock()
+shutdown = threading.Event()
+riot_active = False
+lockdown = False
+
+# DESIGN PATTERN 2 — STATE: InmateState hierarchy
+
+# The main inmate loop never checks flags directly.
+# It calls inmate.state.choose_action() and the correct state object
+# decides what to do — Free acts normally, Solitary waits, etc.
+# Transitions: inmate.set_state(NewState())  (Session 24 — State)
+
+class InmateState(ABC):
+    @abstractmethod
+    def choose_action(self, inmate: Inmate) -> str: ...
+
+
+class FreeState(InmateState):
+    """Full action menu, weighted by reputation. Default state."""
+    def choose_action(self, inmate):
+        r = inmate.reputation
+        w = {
+            "move": 1.0,
+            "work": max(0.1, 0.6 - r * 0.4),
+            "eat": 0.3,
+            "shower": 0.2,
+            "trade": 0.3,
+            "gamble": 0.2 + r * 0.2,
+            "pay_debt": 0.3 if inmate.debt > 0 else 0.0,
+            "fight": min(1.0, 0.1 + r * 0.6),
+            "smuggle": min(1.0, 0.05 + r * 0.3),
+            "escape": min(1.0, 0.02 + r * 0.1),
+            "idle": max(0.1, 0.4 - r * 0.3),
+        }
+        return random.choices(list(w), list(w.values()), k=1)[0]
+
+
+class SolitaryState(InmateState):
+
+#No actions. Polls release time; returns to Free when done.
+
+    def on_enter(self, inmate):
+        EventLogger().log(inmate.id, "solitary_start", "solitary")
+
+    def choose_action(self, inmate):
+        if time.time() >= inmate.solitary_until:
+            with solitary_lock:
+                if inmate.id in solitary_q:
+                    solitary_q.remove(inmate.id)
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+            EventLogger().log(inmate.id, "solitary_release", "cell_block")
+            print(f"    [RELEASED]  {inmate.name} out of solitary.")
+        return "idle"
+
+
+class ParoleState(InmateState):
+    """Violent actions suppressed, inmate trying to behave."""
+    _BLOCKED = {"fight", "smuggle", "escape"}
+    def choose_action(self, inmate):
+        a = FreeState().choose_action(inmate)
+        return "idle" if a in self._BLOCKED else a
+
+
+class RiotState(InmateState):
+    """Chaos: fight, loot, or idle only."""
+    def choose_action(self, inmate):
+        return random.choice(["fight", "loot", "idle"])
+
+
+class InfirmaryState(InmateState):
+    """Recovering. Transitions to Free when timer expires."""
+    def choose_action(self, inmate):
+        if time.time() >= inmate.recovery_until:
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+        return "idle"
+
+
+
+# DESIGN PATTERN 3, Chain of responsibility: Fight consequences
+#
+# Each handler checks one condition. If it acts, it may stop the
+# chain (return). Otherwise it calls super().handle() to pass on.
+# Built once as FIGHT_CHAIN; reused by every fight.
+
+class FightHandler(ABC):
+    _next: "FightHandler" = None
+
+    def set_next(self, h):
+        self._next = h; return h
+
+    def handle(self, winner, loser, ctx):
+        if self._next: self._next.handle(winner, loser, ctx)
+
+
+class KillHandler(FightHandler):
+    """Loser may be killed, chain stops if so."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.05 + (0.05 if ctx.get("armed") else 0):
+            loser.alive = False
+            ctx["done"] = True
+            _upd_rep(winner, +0.10)
+            EventLogger().log(loser.id, "killed", loser.current_loc, f"by={winner.name}")
+            print(f"    [KILLED]    {loser.name} killed by {winner.name}.")
+            return
+        super().handle(winner, loser, ctx)
+
+
+class InjuryHandler(FightHandler):
+    """Loser may go to infirmary."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.20:
+            _to_infirmary(loser, random.randint(20, 40))
+            ctx["done"] = True
+            return
+        super().handle(winner, loser, ctx)
+
+
+class SolitaryHandler(FightHandler):
+    """Loser may be sent to solitary confinement."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.45:
+            _to_solitary(loser, random.randint(20, 40), "lost_fight")
+        super().handle(winner, loser, ctx)
+
+
+class SentenceHandler(FightHandler):
+    """Winner may receive an added sentence for instigating."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.20:
+            n = random.randint(1, 5)
+            winner.sentence_days += n
+            EventLogger().log(winner.id, "sentence_added", outcome=f"+{n}d")
+
+# Build the chain once at module level
+_chain = KillHandler()
+_chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
+FIGHT_CHAIN = _chain
+
+
+# Design Pattern #4 Proxy: GuardProxy
+
+# All movement routes through PROXY.enter(inmate, location).
+# The inmate code never knows whether a guard check occurred.
+# The proxy runs the inspection and only then delegates to the
+# real LocationAccess object.
+
+# This also demonstrates the critical region for location occupancy:
+# new_loc.lock acquired first, then old_loc.lock nested inside.
+# Always new-outer/old-inner, this prevents deadlock.
+
+class LocationAccess:
+    """Real subject, capacity-checked location move."""
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        if loc_name not in locs:
+            return False
+        new_loc = locs[loc_name]
+        old_loc = locs.get(inmate.current_loc)
+        if old_loc is new_loc:
+            return True
+        with new_loc.lock:                       # CRITICAL REGION: new outer
+            if len(new_loc.occupants) >= new_loc.capacity:
+                return False
+            if old_loc:
+                with old_loc.lock:               # nested: old inner
+                    if inmate.id in old_loc.occupants:
+                        old_loc.occupants.remove(inmate.id)
+            new_loc.occupants.append(inmate.id)
+            inmate.current_loc = loc_name
+            return True
+
+
+class GuardProxy(LocationAccess):
+    """
+    Proxy intercepts entry requests.
+    - Guard present + bribed  -> allow through, log the pass
+    - Guard present + active  -> inspect first; block if solitary triggered
+    - No guard / corrupt -> delegate straight to LocationAccess
+    """
+    _real = LocationAccess()
+
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        guard = next(
+            (g for g in guards.values() if g.current_loc == loc_name),
+            None)
+
+        if guard:
+            if guard.bribed:
+                EventLogger().log(inmate.id, "bribed_entry", loc_name, guard.name)
+            elif not guard.corrupt:
+                _inspect(guard, inmate)
+                if isinstance(inmate.state, SolitaryState):
+                    return False              # inspection sent them to solitary
+
+        return self._real.enter(inmate, loc_name)
+
+
+PROXY = GuardProxy()
+
+
+
+# Helpers
+
+def _enter_loc(inmate, loc_name):
+    """All movement routes through the Proxy."""
+    return PROXY.enter(inmate, loc_name)
+
+
+def _upd_rep(inmate, delta):
+    """Atomic reputation update. CRITICAL REGION: rep_lock."""
+    with inmate.rep_lock:
+        inmate.reputation = max(0.0, min(1.0, inmate.reputation + delta))
+
+
