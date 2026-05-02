@@ -126,3 +126,72 @@ class EventLogger:
                 [(t, l.name, len(l.occupants), l.capacity) for l in all_locs])
             self._conn.commit()
 
+    def snap_rep(self, all_inmates):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO reputation_snapshots(timestamp,inmate_id,reputation)"
+                " VALUES(?,?,?)",
+                [(t, i.id, i.reputation) for i in all_inmates if i.alive])
+            self._conn.commit()
+
+    def query(self, sql):
+        with self._lock:
+            return self._conn.execute(sql).fetchall()
+
+
+# ─────────────────────────────────────────────────────────────────
+# DATA MODELS
+# ─────────────────────────────────────────────────────────────────
+@dataclass
+class Location:
+    name: str; capacity: int
+    occupants: List[int]     = field(default_factory=list)
+    lock: threading.Lock     = field(default_factory=threading.Lock)
+    gang_ctrl: Optional[int] = None
+
+
+@dataclass
+class Inmate:
+    id: int; name: str; ethnicity: str
+    reputation: float        # 0.0 = calm  →  1.0 = violent
+    sentence_days: int
+    gang_id:   Optional[int] = None
+    inventory: List[str]     = field(default_factory=list)
+    alive:     bool          = True
+    escaped:   bool          = False
+    debt:      int           = 0
+    current_loc: str         = "cell_block"
+    solitary_until: float    = 0.0
+    recovery_until: float    = 0.0
+    state: "InmateState"     = None
+    inv_lock: threading.Lock = field(default_factory=threading.Lock)
+    rep_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        if self.state is None:
+            self.state = FreeState()
+
+    def set_state(self, s): self.state = s
+
+
+@dataclass
+class Guard:
+    id: int; name: str
+    corrupt:     bool  = False
+    bribed:      bool  = False
+    bribe_until: float = 0.0
+    current_loc: str   = "cell_block"
+
+
+@dataclass
+class Gang:
+    id: int; name: str; ethnicity: str
+    members:  List[int]      = field(default_factory=list)
+    treasury: int            = 0
+    lock: threading.Lock     = field(default_factory=threading.Lock)
+
+
+# ─────────────────────────────────────────────────────────────────
+# GLOBAL STATE
+# ─────────────────────────────────────────────────────────────────
