@@ -140,9 +140,9 @@ class EventLogger:
             return self._conn.execute(sql).fetchall()
 
 
-# ─────────────────────────────────────────────────────────────────
+
 # DATA MODELS
-# ─────────────────────────────────────────────────────────────────
+
 @dataclass
 class Location:
     name: str; capacity: int
@@ -192,6 +192,25 @@ class Gang:
     lock: threading.Lock     = field(default_factory=threading.Lock)
 
 
-# ─────────────────────────────────────────────────────────────────
 # GLOBAL STATE
-# ─────────────────────────────────────────────────────────────────
+
+locs:    Dict[str, Location] = {}
+inmates: Dict[int, Inmate]   = {}
+guards:  Dict[int, Guard]    = {}
+gangs:   Dict[int, Gang]     = {}
+
+solitary_q    = []
+solitary_lock = threading.Lock()
+shutdown      = threading.Event()
+riot_active   = False
+lockdown      = False
+
+# DESIGN PATTERN 2 — STATE: InmateState hierarchy
+
+# The main inmate loop never checks flags directly.
+# It calls inmate.state.choose_action() and the correct state object
+# decides what to do — Free acts normally, Solitary waits, etc.
+# Transitions: inmate.set_state(NewState())  (Session 24 — State)
+
+
+
