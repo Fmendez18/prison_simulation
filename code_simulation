@@ -146,8 +146,8 @@ class EventLogger:
 @dataclass
 class Location:
     name: str; capacity: int
-    occupants: List[int]     = field(default_factory=list)
-    lock: threading.Lock     = field(default_factory=threading.Lock)
+    occupants: List[int] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
     gang_ctrl: Optional[int] = None
 
 
@@ -157,14 +157,14 @@ class Inmate:
     reputation: float        # 0.0 = calm  →  1.0 = violent
     sentence_days: int
     gang_id:   Optional[int] = None
-    inventory: List[str]     = field(default_factory=list)
-    alive:     bool          = True
-    escaped:   bool          = False
-    debt:      int           = 0
-    current_loc: str         = "cell_block"
-    solitary_until: float    = 0.0
-    recovery_until: float    = 0.0
-    state: "InmateState"     = None
+    inventory: List[str] = field(default_factory=list)
+    alive: bool = True
+    escaped: bool = False
+    debt: int = 0
+    current_loc: str  = "cell_block"
+    solitary_until: float = 0.0
+    recovery_until: float = 0.0
+    state: "InmateState" = None
     inv_lock: threading.Lock = field(default_factory=threading.Lock)
     rep_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -178,18 +178,18 @@ class Inmate:
 @dataclass
 class Guard:
     id: int; name: str
-    corrupt:     bool  = False
-    bribed:      bool  = False
+    corrupt: bool  = False
+    bribed: bool  = False
     bribe_until: float = 0.0
-    current_loc: str   = "cell_block"
+    current_loc: str = "cell_block"
 
 
 @dataclass
 class Gang:
     id: int; name: str; ethnicity: str
-    members:  List[int]      = field(default_factory=list)
-    treasury: int            = 0
-    lock: threading.Lock     = field(default_factory=threading.Lock)
+    members: List[int] = field(default_factory=list)
+    treasury: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 # GLOBAL STATE
