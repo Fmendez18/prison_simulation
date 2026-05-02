@@ -194,16 +194,16 @@ class Gang:
 
 # GLOBAL STATE
 
-locs:    Dict[str, Location] = {}
-inmates: Dict[int, Inmate]   = {}
-guards:  Dict[int, Guard]    = {}
-gangs:   Dict[int, Gang]     = {}
+locs: Dict[str, Location] = {}
+inmates: Dict[int, Inmate] = {}
+guards: Dict[int, Guard] = {}
+gangs: Dict[int, Gang] = {}
 
-solitary_q    = []
+solitary_q = []
 solitary_lock = threading.Lock()
-shutdown      = threading.Event()
-riot_active   = False
-lockdown      = False
+shutdown = threading.Event()
+riot_active = False
+lockdown = False
 
 # DESIGN PATTERN 2 — STATE: InmateState hierarchy
 
@@ -212,5 +212,47 @@ lockdown      = False
 # decides what to do — Free acts normally, Solitary waits, etc.
 # Transitions: inmate.set_state(NewState())  (Session 24 — State)
 
+class InmateState(ABC):
+    @abstractmethod
+    def choose_action(self, inmate: Inmate) -> str: ...
+
+
+class FreeState(InmateState):
+    """Full action menu, weighted by reputation. Default state."""
+    def choose_action(self, inmate):
+        r = inmate.reputation
+        w = {
+            "move": 1.0,
+            "work": max(0.1, 0.6 - r * 0.4),
+            "eat": 0.3,
+            "shower": 0.2,
+            "trade": 0.3,
+            "gamble": 0.2 + r * 0.2,
+            "pay_debt": 0.3 if inmate.debt > 0 else 0.0,
+            "fight": min(1.0, 0.1 + r * 0.6),
+            "smuggle": min(1.0, 0.05 + r * 0.3),
+            "escape": min(1.0, 0.02 + r * 0.1),
+            "idle": max(0.1, 0.4 - r * 0.3),
+        }
+        return random.choices(list(w), list(w.values()), k=1)[0]
+
+
+class SolitaryState(InmateState):
+
+#No actions. Polls release time; returns to Free when done.
+
+    def on_enter(self, inmate):
+        EventLogger().log(inmate.id, "solitary_start", "solitary")
+
+    def choose_action(self, inmate):
+        if time.time() >= inmate.solitary_until:
+            with solitary_lock:
+                if inmate.id in solitary_q:
+                    solitary_q.remove(inmate.id)
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+            EventLogger().log(inmate.id, "solitary_release", "cell_block")
+            print(f"    [RELEASED]  {inmate.name} out of solitary.")
+        return "idle"
 
 
