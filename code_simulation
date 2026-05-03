@@ -455,4 +455,65 @@ def _to_solitary(inmate, dur_s, reason):
     print(f"    [SOLITARY]  {inmate.name} → {dur_s}s ({reason})")
 
 
+def _to_infirmary(inmate, dur_s):
+    """Send inmate to infirmary to recover."""
+    _evict(inmate)
+    inmate.recovery_until = time.time() + dur_s
+    inmate.set_state(InfirmaryState())
+    if not LocationAccess().enter(inmate, "infirmary"):
+        LocationAccess().enter(inmate, "cell_block")
+    EventLogger().log(inmate.id, "infirmary", outcome=f"{dur_s}s")
+
+
+def _nearby(loc_name, exclude=-1) -> List[Inmate]:
+    """
+    Relaxed read of current location occupants, no lock needed here
+    because we are only reading for targeting.
+    """
+    loc = locs.get(loc_name)
+    if not loc: return []
+    return [inmates[i] for i in list(loc.occupants)
+            if i != exclude and i in inmates and inmates[i].alive
+            and not isinstance(inmates[i].state, (SolitaryState, InfirmaryState))]
+
+
+def _inspect(guard, inmate):
+    """Called by GuardProxy before allowing location entry."""
+    # Bribe attempt: Guard bribe status is a shared boolean, written here
+    if "cash" in inmate.inventory and random.random() < 0.35:
+        with inmate.inv_lock:
+            if "cash" in inmate.inventory:
+                inmate.inventory.remove("cash")
+        guard.bribed = True                      # Guard bribe status 
+        guard.bribe_until = time.time() + random.uniform(20, 60)
+        EventLogger().log(inmate.id, "bribe", guard.current_loc, guard.name)
+        print(f"    [BRIBE]     {inmate.name} bribed {guard.name}.")
+        return
+    # Contraband seizure
+    with inmate.inv_lock:
+        bad = [x for x in inmate.inventory if x in ("shiv", "drugs", "lockpick")]
+    if bad:
+        item = random.choice(bad)
+        with inmate.inv_lock:
+            if item in inmate.inventory:
+                inmate.inventory.remove(item)
+        EventLogger().log(inmate.id, "contraband_seized",
+                          guard.current_loc, f"{item}|{guard.name}")
+        print(f"    [SEIZED]    {guard.name} took {item} from {inmate.name}.")
+        if random.random() < 0.55:
+            _to_solitary(inmate, random.randint(20, 50), f"contraband_{item}")
+
+
+def _resolve_fight(attacker, defender, reason="fight"):
+    """
+    Core fight resolution used by all fight types.
+
+    CONSTRAINT 1: duration always drawn from Uniform(2, 6) seconds.
+    Reputation updated atomically, lower-ID lock acquired first,
+    preventing concurrent reputation write races
+    Consequences delegated fully to FIGHT_CHAIN.
+    """
+    if not (attacker.alive and defender.alive): return
+    if isinstance(attacker.state, (SolitaryState, InfirmaryState)): return
+    if isinstance(defender.state, (SolitaryState, InfirmaryState)): return
 
