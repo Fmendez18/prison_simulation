@@ -517,3 +517,130 @@ def _resolve_fight(attacker, defender, reason="fight"):
     if isinstance(attacker.state, (SolitaryState, InfirmaryState)): return
     if isinstance(defender.state, (SolitaryState, InfirmaryState)): return
 
+# CONSTRAINT 1 — fight must last 2–6 seconds
+    dur = random.uniform(2.0, 6.0)
+    t0  = time.time()
+    time.sleep(dur)
+    ms  = int((time.time() - t0) * 1000)
+
+    armed_atk = any(x in WEAPONS for x in attacker.inventory)
+    armed_def = any(x in WEAPONS for x in defender.inventory)
+    a_score   = attacker.reputation + (0.2 if armed_atk else 0) + random.random() * 0.4
+    d_score   = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
+    w, l      = (attacker, defender) if a_score >= d_score else (defender, attacker)
+
+    # Atomic reputation update — lower-ID first (prevents deadlock)
+    f, s = (w, l) if w.id < l.id else (l, w)
+    with f.rep_lock:                             # CRITICAL REGION
+        with s.rep_lock:
+            w.reputation = min(1.0, w.reputation + 0.05)
+            l.reputation = max(0.0, l.reputation - 0.03)
+
+    EventLogger().log(attacker.id, "fight", attacker.current_loc,
+                      f"w={w.name},l={l.name},{reason}", ms)
+    print(f"    [FIGHT]     {attacker.name} vs {defender.name}"
+          f" → {w.name} ({ms}ms) [{reason}]")
+
+    # Delegate all consequences to the Chain of Responsibility
+    FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
+
+
+# ─────────────────────────────────────────────────────────────────
+# INMATE ACTIONS
+# ─────────────────────────────────────────────────────────────────
+def _act_move(i):
+    dest = random.choice(list(locs.keys()))
+    if dest != i.current_loc and _enter_loc(i, dest):
+        EventLogger().log(i.id, "move", dest)
+
+def _act_work(i):
+    time.sleep(random.uniform(1, 3))
+    i.sentence_days = max(0, i.sentence_days - 1)
+    EventLogger().log(i.id, "work", i.current_loc)
+
+def _act_eat(i):
+    if _enter_loc(i, "cafeteria"):
+        time.sleep(random.uniform(1, 2))
+        EventLogger().log(i.id, "eat", "cafeteria")
+
+def _act_shower(i):
+    if not _enter_loc(i, "showers"): return
+    time.sleep(random.uniform(1, 3))
+    # Drop-the-soap: danger scales with reputation (notorious = more enemies)
+    if random.random() < 0.02 + i.reputation * 0.04:
+        i.alive = False
+        EventLogger().log(i.id, "drop_the_soap", "showers", "eliminated")
+        print(f"    [SOAP]      {i.name} eliminated in showers.")
+    else:
+        EventLogger().log(i.id, "shower", "showers")
+    _enter_loc(i, "cell_block")
+
+def _act_trade(i):
+    targets = _nearby(i.current_loc, i.id)
+    if targets and i.inventory:
+        t    = random.choice(targets)
+        item = random.choice(i.inventory)
+        if _transfer(i, t, item):
+            EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
+            print(f"    [TRADE]     {i.name} → {t.name}: {item}")
+
+def _act_gamble(i):
+    targets = _nearby(i.current_loc, i.id)
+    if not targets: return
+    t, stake = random.choice(targets), random.randint(1, 3)
+    if random.random() > 0.5:
+        t.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"won,{stake}")
+    else:
+        i.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"lost,{stake}")
+
+def _act_pay_debt(i):
+    p = next((x for x in ("cash", "tobacco") if x in i.inventory), None)
+    if p:
+        with i.inv_lock:
+            if p in i.inventory: i.inventory.remove(p)
+        i.debt = max(0, i.debt - 1)
+        EventLogger().log(i.id, "pay_debt", outcome=p)
+    else:
+        _upd_rep(i, -0.02)
+
+def _act_fight(i):
+    t = _nearby(i.current_loc, i.id)
+    if t: _resolve_fight(i, random.choice(t), "spontaneous")
+
+def _act_smuggle(i):
+    corrupt_here = any(g.corrupt and g.current_loc == i.current_loc for g in guards.values())
+    if random.random() < (0.55 if corrupt_here else 0.30):
+        item = random.choice(CONTRABAND)
+        with i.inv_lock: i.inventory.append(item)
+        EventLogger().log(i.id, "smuggle", outcome=item)
+        print(f"    [SMUGGLE]   {i.name}: {item}")
+
+def _act_escape(i):
+    with i.inv_lock:
+        prob = 0.04 + (0.10 if "lockpick" in i.inventory else 0) + i.reputation * 0.05
+    if random.random() < prob:
+        i.escaped = True; _evict(i)
+        EventLogger().log(i.id, "escape", outcome="success")
+        print(f"    [ESCAPE]    {i.name}: ESCAPED!")
+    else:
+        i.sentence_days += random.randint(5, 15)
+        _to_solitary(i, random.randint(40, 80), "escape_attempt")
+        EventLogger().log(i.id, "escape", outcome="caught")
+        print(f"    [ESCAPE]    {i.name}: caught.")
+
+def _act_loot(i):
+    for t in _nearby(i.current_loc, i.id):
+        if t.inventory and random.random() < 0.3:
+            _transfer(t, i, random.choice(t.inventory))
+            EventLogger().log(i.id, "riot_loot", outcome=t.name)
+            break
+
+# Dispatch table — maps action string to handler function
+_ACTIONS = {
+    "move": _act_move, "work": _act_work, "eat": _act_eat,
+    "shower": _act_shower, "trade": _act_trade, "gamble": _act_gamble,
+    "pay_debt": _act_pay_debt, "fight": _act_fight, "smuggle": _act_smuggle,
+    "escape": _act_escape, "loot": _act_loot, "idle": lambda i: None,
+}
