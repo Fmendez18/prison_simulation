@@ -415,3 +415,44 @@ def _upd_rep(inmate, delta):
         inmate.reputation = max(0.0, min(1.0, inmate.reputation + delta))
 
 
+def _transfer(giver, receiver, item) -> bool:
+    """
+    Atomic two-inventory transfer.
+    Always lock lower-ID inmate first — prevents A→B / B→A deadlock.
+    CRITICAL REGION: both inv_locks.  (Session 2 — solving deadlock)
+    """
+    a, b = (giver, receiver) if giver.id < receiver.id else (receiver, giver)
+    with a.inv_lock:
+        with b.inv_lock:
+            if item in giver.inventory:
+                giver.inventory.remove(item)
+                receiver.inventory.append(item)
+                return True
+    return False
+
+
+def _evict(inmate):
+    """Remove inmate from current location (for solitary/infirmary)."""
+    loc = locs.get(inmate.current_loc)
+    if loc:
+        with loc.lock:
+            if inmate.id in loc.occupants:
+                loc.occupants.remove(inmate.id)
+    inmate.current_loc = "none"
+
+
+def _to_solitary(inmate, dur_s, reason):
+    """Send inmate to solitary. CRITICAL REGION: solitary_lock."""
+    if isinstance(inmate.state, SolitaryState):
+        return
+    _evict(inmate)
+    inmate.solitary_until = time.time() + dur_s
+    inmate.set_state(SolitaryState())
+    inmate.state.on_enter(inmate)
+    with solitary_lock:                          # CRITICAL REGION
+        if inmate.id not in solitary_q:
+            solitary_q.append(inmate.id)
+    print(f"    [SOLITARY]  {inmate.name} → {dur_s}s ({reason})")
+
+
+
