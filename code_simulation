@@ -787,3 +787,62 @@ def gang_thread(gang: Gang):
 
     print(f"  [EXIT]    Gang {gang.name}")
 
+def monitor_thread():
+    """Snapshots location occupancy every 1 s → constraint 2."""
+    log = EventLogger()
+    while not shutdown.is_set():
+        log.snap_capacity(list(locs.values()))
+        time.sleep(1)
+
+
+def rep_monitor_thread():
+    """Snapshots reputation every 2 s → reputation graphs."""
+    log = EventLogger()
+    while not shutdown.is_set():
+        log.snap_rep(list(inmates.values()))
+        time.sleep(2)
+
+
+# ─────────────────────────────────────────────────────────────────
+# WORLD BUILDER
+# ─────────────────────────────────────────────────────────────────
+NAMES       = [n for eth in ETHNICITIES for n in NAMES_BY_ETH[eth][:4]]
+GANG_NAMES  = ["Black Stone Brotherhood", "White Wall Syndicate", "East Dragon Triad"]
+GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
+
+
+def build_world():
+    for name, cap in LOCATION_CAPS.items():
+        locs[name] = Location(name, cap)
+
+    for i in range(NUM_GANGS):
+        gangs[i] = Gang(i, GANG_NAMES[i], ETHNICITIES[i % len(ETHNICITIES)])
+
+    eth_counters = {e: 0 for e in ETHNICITIES}
+    for i in range(NUM_INMATES):
+        eth = random.choice(ETHNICITIES)
+        pool = NAMES_BY_ETH[eth]
+        idx  = eth_counters[eth] % len(pool)
+        eth_counters[eth] += 1
+        name = pool[idx]
+        gid  = None
+        if random.random() < 0.60:
+            mg = [g for g in gangs.values() if g.ethnicity == eth]
+            if mg:
+                g = random.choice(mg); gid = g.id
+                with g.lock: g.members.append(i)
+        inmates[i] = Inmate(
+            i, name, eth,
+            reputation    = random.uniform(0.0, 1.0),
+            sentence_days = random.randint(10, 60),
+            gang_id       = gid,
+            inventory     = random.sample(CONTRABAND, random.randint(0, 2)),
+        )
+
+    for i in range(NUM_GUARDS):
+        corrupt = random.random() < 0.25
+        guards[i] = Guard(i, GUARD_NAMES[i % len(GUARD_NAMES)], corrupt=corrupt)
+        if corrupt:
+            print(f"  [INIT]    {GUARD_NAMES[i % len(GUARD_NAMES)]} is CORRUPT.")
+
+
