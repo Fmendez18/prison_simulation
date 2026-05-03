@@ -517,7 +517,7 @@ def _resolve_fight(attacker, defender, reason="fight"):
     if isinstance(attacker.state, (SolitaryState, InfirmaryState)): return
     if isinstance(defender.state, (SolitaryState, InfirmaryState)): return
 
-# CONSTRAINT 1 — fight must last 2–6 seconds
+# CONSTRAINT 1: fight must last 2–6 seconds
     dur = random.uniform(2.0, 6.0)
     t0  = time.time()
     time.sleep(dur)
@@ -529,7 +529,7 @@ def _resolve_fight(attacker, defender, reason="fight"):
     d_score   = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
     w, l      = (attacker, defender) if a_score >= d_score else (defender, attacker)
 
-    # Atomic reputation update — lower-ID first (prevents deadlock)
+    # Atomic reputation update, lower-ID first (prevents deadlock)
     f, s = (w, l) if w.id < l.id else (l, w)
     with f.rep_lock:                             # CRITICAL REGION
         with s.rep_lock:
@@ -545,9 +545,7 @@ def _resolve_fight(attacker, defender, reason="fight"):
     FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
 
 
-# ─────────────────────────────────────────────────────────────────
 # INMATE ACTIONS
-# ─────────────────────────────────────────────────────────────────
 def _act_move(i):
     dest = random.choice(list(locs.keys()))
     if dest != i.current_loc and _enter_loc(i, dest):
@@ -637,10 +635,155 @@ def _act_loot(i):
             EventLogger().log(i.id, "riot_loot", outcome=t.name)
             break
 
-# Dispatch table — maps action string to handler function
+# Dispatch table: maps action string to handler function
 _ACTIONS = {
     "move": _act_move, "work": _act_work, "eat": _act_eat,
     "shower": _act_shower, "trade": _act_trade, "gamble": _act_gamble,
     "pay_debt": _act_pay_debt, "fight": _act_fight, "smuggle": _act_smuggle,
     "escape": _act_escape, "loot": _act_loot, "idle": lambda i: None,
 }
+
+# THREAD FUNCTIONS
+
+def inmate_thread(inmate: Inmate):
+    """
+    Main inmate loop.  The State pattern drives all behaviour,
+    the loop only calls inmate.state.choose_action() and dispatches.
+    Actions are spaced around 2 seconds apart per the project spec.
+    """
+    print(f"  [SPAWN]   Inmate {inmate.name} | rep={inmate.reputation:.2f}"
+          f" | eth={inmate.ethnicity}")
+    LocationAccess().enter(inmate, "cell_block")   # bypass proxy for initial placement
+
+    while not shutdown.is_set() and inmate.alive and not inmate.escaped:
+        # Sync to global riot flag via State transition
+        if riot_active and not isinstance(inmate.state, RiotState):
+            inmate.set_state(RiotState())
+        if not riot_active and isinstance(inmate.state, RiotState):
+            inmate.set_state(FreeState())
+
+        action = inmate.state.choose_action(inmate)
+        fn = _ACTIONS.get(action)
+        if fn: fn(inmate)
+
+        # Around 2 seconds between actions (calmer inmates wait slightly longer)
+        time.sleep(max(1.0, random.uniform(1.5, 2.5) * (1.1 - inmate.reputation * 0.2)))
+
+    print(f"  [EXIT]    {inmate.name} "
+          f"({'escaped' if inmate.escaped else 'dead' if not inmate.alive else 'done'})")
+
+
+def guard_thread(guard: Guard):
+    """
+    Guard patrol loop. Patrols locations, runs inspections.
+    Bribe status is checked each cycle, if expired, resets.
+    Corrupt guards smuggle contraband in instead of inspecting.
+    """
+    print(f"  [SPAWN]   Guard {guard.name} | corrupt={guard.corrupt}")
+
+    while not shutdown.is_set():
+        # Bribe expiry check (Guard bribe status, shared write)
+        if guard.bribed and time.time() > guard.bribe_until:
+            guard.bribed = False
+            EventLogger().log(None, "bribe_expired", guard.current_loc)
+
+        guard.current_loc = random.choice(list(locs.keys()))
+
+        if guard.corrupt:
+            # Corrupt guard smuggles contraband in for an inmate
+            loc = locs.get(guard.current_loc)
+            if loc:
+                occ = [inmates[i] for i in list(loc.occupants) if i in inmates]
+                if occ:
+                    b    = random.choice(occ)
+                    item = random.choice(CONTRABAND)
+                    with b.inv_lock: b.inventory.append(item)
+                    EventLogger().log(b.id, "guard_smuggle",
+                                      guard.current_loc, f"{item}|{guard.name}")
+                    print(f"  [CORRUPT]  {guard.name} smuggled {item} to {b.name}.")
+        elif not guard.bribed:
+            loc = locs.get(guard.current_loc)
+            if loc:
+                for iid in list(loc.occupants):
+                    if iid in inmates and inmates[iid].alive:
+                        _inspect(guard, inmates[iid])
+
+        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 s
+
+    print(f"  [EXIT]    Guard {guard.name}")
+
+
+def gang_thread(gang: Gang):
+    """
+    Gang strategy loop. Gangs deliberate every 10–20 s.
+    Actions: group fight, recruit, tax members.
+    """
+    print(f"  [SPAWN]   Gang {gang.name} | eth={gang.ethnicity}")
+
+    while not shutdown.is_set():
+        time.sleep(random.uniform(10, 20))
+        if lockdown or riot_active or shutdown.is_set(): continue
+
+        action = random.choices(
+            ["fight", "recruit", "tax", "idle"],
+            weights=[0.30, 0.25, 0.25, 0.20], k=1)[0]
+
+        if action == "fight":
+            with gang.lock: ids = list(gang.members)
+            members = [inmates[m] for m in ids
+                       if m in inmates and inmates[m].alive
+                       and not isinstance(inmates[m].state,
+                                          (SolitaryState, InfirmaryState))]
+            rivals = [i for i in inmates.values()
+                      if i.alive and i.gang_id != gang.id]
+            if len(members) >= 2 and rivals:
+                atk = random.choice(members)
+                tgt = random.choice(rivals)
+                win = random.random() < 0.5 + min(0.2, 0.05 * len(members))
+                dur = random.uniform(2.0, 6.0)
+                t0  = time.time(); time.sleep(dur)
+                ms  = int((time.time() - t0) * 1000)
+                EventLogger().log(atk.id, "gang_fight", atk.current_loc,
+                                  f"win={win},t={tgt.name}", ms)
+                print(f"  [GANG]     {gang.name} vs {tgt.name}: "
+                      f"{'WIN' if win else 'LOSS'} ({ms}ms)")
+                if win:
+                    _upd_rep(atk, +0.05)
+                    if random.random() < 0.10:
+                        tgt.alive = False
+                        EventLogger().log(tgt.id, "killed", outcome=f"gang={gang.name}")
+                        print(f"  [KILLED]   {tgt.name} killed by {gang.name}.")
+                    elif random.random() < 0.35:
+                        _to_solitary(tgt, random.randint(20, 50), "gang_fight")
+                else:
+                    _upd_rep(atk, -0.04)
+
+        elif action == "recruit":
+            pool = [i for i in inmates.values()
+                    if i.gang_id is None and i.alive
+                    and i.ethnicity == gang.ethnicity]
+            if pool:
+                r = random.choice(pool)
+                with gang.lock:
+                    r.gang_id = gang.id
+                    gang.members.append(r.id)
+                _upd_rep(r, +0.05)
+                EventLogger().log(r.id, "gang_join", outcome=gang.name)
+                print(f"  [GANG]     {r.name} joined {gang.name}.")
+
+        elif action == "tax":
+            with gang.lock: ids = list(gang.members)
+            for mid in ids:
+                m = inmates.get(mid)
+                if not m or not m.alive: continue
+                p = next((x for x in ("cash", "tobacco") if x in m.inventory), None)
+                if p:
+                    with m.inv_lock:
+                        if p in m.inventory: m.inventory.remove(p)
+                    with gang.lock: gang.treasury += 1
+                    EventLogger().log(m.id, "gang_tax", outcome=p)
+                else:
+                    _upd_rep(m, -0.01)
+
+    print(f"  [EXIT]    Gang {gang.name}")
+
