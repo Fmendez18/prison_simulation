@@ -91,3 +91,70 @@ class EventLogger:
         with self._lock:
             return self._conn.execute(sql).fetchall()
 
+class Location:
+    def __init__(self, name, capacity, gang_ctrl=None):
+        self.name = name
+        self.capacity = capacity
+        self.occupants = []
+        self.lock = threading.Lock()
+        self.gang_ctrl = gang_ctrl
+
+
+class Inmate:
+    def __init__(self, id, name, ethnicity, reputation, sentence_days,
+                 gang_id=None, inventory=None, alive=True, escaped=False,
+                 debt=0, current_loc="cell_block", solitary_until=0.0,
+                 recovery_until=0.0, state=None):
+        self.id = id
+        self.name = name
+        self.ethnicity = ethnicity
+        self.reputation = reputation
+        self.sentence_days = sentence_days
+        self.gang_id = gang_id
+        self.inventory = inventory if inventory is not None else []
+        self.alive = alive
+        self.escaped = escaped
+        self.debt = debt
+        self.current_loc = current_loc
+        self.solitary_until = solitary_until
+        self.recovery_until = recovery_until
+        self.state = state if state is not None else FreeState()
+        self.inv_lock = threading.Lock()
+        self.rep_lock = threading.Lock()
+
+    def set_state(self, s):
+        self.state = s
+
+
+class Guard:
+    def __init__(self, id, name, corrupt=False, bribed=False,
+                 bribe_until=0.0, current_loc="cell_block"):
+        self.id = id
+        self.name = name
+        self.corrupt = corrupt
+        self.bribed = bribed
+        self.bribe_until = bribe_until
+        self.current_loc = current_loc
+
+
+class Gang:
+    def __init__(self, id, name, ethnicity, treasury=0):
+        self.id = id
+        self.name = name
+        self.ethnicity = ethnicity
+        self.members = []
+        self.treasury = treasury
+        self.lock = threading.Lock()
+
+# GLOBAL STATE
+
+locs: Dict[str, Location] = {}
+inmates: Dict[int, Inmate] = {}
+guards: Dict[int, Guard] = {}
+gangs: Dict[int, Gang] = {}
+
+solitary_q = []
+solitary_lock = threading.Lock()
+shutdown = threading.Event()
+riot_active = False
+lockdown = False
