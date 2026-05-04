@@ -158,3 +158,117 @@ solitary_lock = threading.Lock()
 shutdown = threading.Event()
 riot_active = False
 lockdown = False
+
+# ── DESIGN PATTERN 2: STATE ───────────────────────────────────────────────────
+ 
+class FreeState:
+    def choose_action(self, inmate):
+        r = inmate.reputation
+        w = {
+            "move":     1.0,
+            "work":     max(0.1, 0.6 - r * 0.4),
+            "eat":      0.3,
+            "shower":   0.2,
+            "trade":    0.3,
+            "gamble":   0.2 + r * 0.2,
+            "pay_debt": 0.3 if inmate.debt > 0 else 0.0,
+            "fight":    min(1.0, 0.1 + r * 0.6),
+            "smuggle":  min(1.0, 0.05 + r * 0.3),
+            "escape":   min(1.0, 0.02 + r * 0.1),
+            "idle":     max(0.1, 0.4 - r * 0.3),
+        }
+        return random.choices(list(w), list(w.values()), k=1)[0]
+ 
+ 
+class SolitaryState:
+    def on_enter(self, inmate):
+        EventLogger().log(inmate.id, "solitary_start", "solitary")
+ 
+    def choose_action(self, inmate):
+        if time.time() >= inmate.solitary_until:
+            with solitary_lock:
+                if inmate.id in solitary_q:
+                    solitary_q.remove(inmate.id)
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+            EventLogger().log(inmate.id, "solitary_release", "cell_block")
+            print(f"    [RELEASED]  {inmate.name} out of solitary.")
+        return "idle"
+ 
+ 
+class ParoleState:
+    _BLOCKED = {"fight", "smuggle", "escape"}
+ 
+    def choose_action(self, inmate):
+        a = FreeState().choose_action(inmate)
+        return "idle" if a in self._BLOCKED else a
+ 
+ 
+class RiotState:
+    def choose_action(self, inmate):
+        return random.choice(["fight", "loot", "idle"])
+ 
+ 
+class InfirmaryState:
+    def choose_action(self, inmate):
+        if time.time() >= inmate.recovery_until:
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+        return "idle"
+ 
+ 
+# ── DESIGN PATTERN 3: CHAIN OF RESPONSIBILITY ─────────────────────────────────
+ 
+class FightHandler:
+    def __init__(self):
+        self._next = None
+ 
+    def set_next(self, h):
+        self._next = h
+        return h
+ 
+    def handle(self, winner, loser, ctx):
+        if self._next:
+            self._next.handle(winner, loser, ctx)
+ 
+ 
+class KillHandler(FightHandler):
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.05 + (0.05 if ctx.get("armed") else 0):
+            loser.alive = False
+            ctx["done"] = True
+            _upd_rep(winner, +0.10)
+            EventLogger().log(loser.id, "killed", loser.current_loc, f"by={winner.name}")
+            print(f"    [KILLED]    {loser.name} killed by {winner.name}.")
+            return
+        super().handle(winner, loser, ctx)
+ 
+ 
+class InjuryHandler(FightHandler):
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.20:
+            _to_infirmary(loser, random.randint(20, 40))
+            ctx["done"] = True
+            return
+        super().handle(winner, loser, ctx)
+ 
+ 
+class SolitaryHandler(FightHandler):
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.45:
+            _to_solitary(loser, random.randint(20, 40), "lost_fight")
+        super().handle(winner, loser, ctx)
+ 
+ 
+class SentenceHandler(FightHandler):
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.20:
+            n = random.randint(1, 5)
+            winner.sentence_days += n
+            EventLogger().log(winner.id, "sentence_added", outcome=f"+{n}d")
+ 
+ 
+_chain = KillHandler()
+_chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
+FIGHT_CHAIN = _chain
+ 
