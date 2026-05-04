@@ -271,4 +271,52 @@ class SentenceHandler(FightHandler):
 _chain = KillHandler()
 _chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
 FIGHT_CHAIN = _chain
- 
+
+
+#DESIGN PATTERN 4: PROXY
+
+class LocationAccess:
+    def enter(self, inmate, loc_name):
+        if loc_name not in locs:
+            return False
+        new_loc = locs[loc_name]
+        old_loc = locs.get(inmate.current_loc)
+        if old_loc is new_loc:
+            return True
+        with new_loc.lock:
+            if len(new_loc.occupants) >= new_loc.capacity:
+                return False
+            if old_loc:
+                with old_loc.lock:
+                    if inmate.id in old_loc.occupants:
+                        old_loc.occupants.remove(inmate.id)
+            new_loc.occupants.append(inmate.id)
+            inmate.current_loc = loc_name
+            return True
+
+
+class GuardProxy(LocationAccess):
+    def __init__(self):
+        self._real = LocationAccess()
+
+    def enter(self, inmate, loc_name):
+        guard = None
+        for g in guards.values():
+            if g.current_loc == loc_name:
+                guard = g
+                break
+
+        if guard:
+            if guard.bribed:
+                EventLogger().log(inmate.id, "bribed_entry", loc_name, guard.name)
+            elif not guard.corrupt:
+                _inspect(guard, inmate)
+                if isinstance(inmate.state, SolitaryState):
+                    return False
+
+        return self._real.enter(inmate, loc_name)
+
+
+PROXY = GuardProxy()
+
+
