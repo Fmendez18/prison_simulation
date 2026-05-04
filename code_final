@@ -148,10 +148,10 @@ class Gang:
 
 # GLOBAL STATE
 
-locs: Dict[str, Location] = {}
-inmates: Dict[int, Inmate] = {}
-guards: Dict[int, Guard] = {}
-gangs: Dict[int, Gang] = {}
+locs = {}
+inmates = {}
+guards = {}
+gangs = {}
 
 solitary_q = []
 solitary_lock = threading.Lock()
@@ -816,7 +816,7 @@ def rep_monitor_thread():
 
 # ── WORLD BUILDER ─────────────────────────────────────────────────────────────
 
-GANG_NAMES  = ["Black Stone Brotherhood", "White Wall Syndicate", "East Dragon Triad"]
+GANG_NAMES  = ["O-Block", "Aryan Brotherhood", "Asian Boys", "Mara Salvatrucha"]
 GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
 
 
