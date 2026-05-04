@@ -1,0 +1,33 @@
+import threading
+import sqlite3
+import random
+import time
+import os
+ 
+SIM_DURATION = 300
+DAY_LEN      = 10
+NUM_INMATES  = 15
+NUM_GUARDS   = 3
+NUM_GANGS    = 3
+DB_PATH      = "prison_events.db"
+ 
+LOCATION_CAPS = {
+    "cell_block": 20, "cafeteria": 15, "courtyard": 15,
+    "gym": 10, "showers": 8, "workshop": 8,
+    "garden": 8, "basketball_court": 10,
+}
+ 
+CONTRABAND  = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
+WEAPONS     = {"shiv"}
+ETHNICITIES = ["black", "white", "asian", "hispanic"]
+ 
+NAMES_BY_ETH = {
+    "black":    ["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
+                 "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
+    "white":    ["Cody", "Travis", "Garrett", "Dustin", "Wade",
+                 "Colton", "Brayden", "Chet", "Ricky", "Dale"],
+    "asian":    ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
+                 "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
+    "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
+                 "Camilo", "Eliseo", "Jose", "Silvio", "Naldo"],
+}
