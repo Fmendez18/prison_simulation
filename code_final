@@ -455,3 +455,122 @@ def _resolve_fight(attacker, defender, reason="fight"):
     print(f"    [FIGHT]     {attacker.name} vs {defender.name} -> {w.name} ({ms}ms) [{reason}]")
 
     FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
+
+
+# ── INMATE ACTIONS ────────────────────────────────────────────────────────────
+ 
+def _act_move(i):
+    dest = random.choice(list(locs.keys()))
+    if dest != i.current_loc and _enter_loc(i, dest):
+        EventLogger().log(i.id, "move", dest)
+ 
+def _act_work(i):
+    time.sleep(random.uniform(1, 3))
+    i.sentence_days = max(0, i.sentence_days - 1)
+    EventLogger().log(i.id, "work", i.current_loc)
+ 
+def _act_eat(i):
+    if _enter_loc(i, "cafeteria"):
+        time.sleep(random.uniform(1, 2))
+        EventLogger().log(i.id, "eat", "cafeteria")
+ 
+def _act_shower(i):
+    if not _enter_loc(i, "showers"):
+        return
+    time.sleep(random.uniform(1, 3))
+    if random.random() < 0.02 + i.reputation * 0.04:
+        i.alive = False
+        EventLogger().log(i.id, "drop_the_soap", "showers", "eliminated")
+        print(f"    [SOAP]      {i.name} eliminated in showers.")
+    else:
+        EventLogger().log(i.id, "shower", "showers")
+    _enter_loc(i, "cell_block")
+ 
+def _act_trade(i):
+    targets = _nearby(i.current_loc, i.id)
+    if targets and i.inventory:
+        t    = random.choice(targets)
+        item = random.choice(i.inventory)
+        if _transfer(i, t, item):
+            EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
+            print(f"    [TRADE]     {i.name} -> {t.name}: {item}")
+ 
+def _act_gamble(i):
+    targets = _nearby(i.current_loc, i.id)
+    if not targets:
+        return
+    t     = random.choice(targets)
+    stake = random.randint(1, 3)
+    if random.random() > 0.5:
+        t.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"won,{stake}")
+    else:
+        i.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"lost,{stake}")
+ 
+def _act_pay_debt(i):
+    p = None
+    for x in ("cash", "tobacco"):
+        if x in i.inventory:
+            p = x
+            break
+    if p:
+        with i.inv_lock:
+            if p in i.inventory:
+                i.inventory.remove(p)
+        i.debt = max(0, i.debt - 1)
+        EventLogger().log(i.id, "pay_debt", outcome=p)
+    else:
+        _upd_rep(i, -0.02)
+ 
+def _act_fight(i):
+    t = _nearby(i.current_loc, i.id)
+    if t:
+        _resolve_fight(i, random.choice(t), "spontaneous")
+ 
+def _act_smuggle(i):
+    corrupt_here = any(g.corrupt and g.current_loc == i.current_loc for g in guards.values())
+    if random.random() < (0.55 if corrupt_here else 0.30):
+        item = random.choice(CONTRABAND)
+        with i.inv_lock:
+            i.inventory.append(item)
+        EventLogger().log(i.id, "smuggle", outcome=item)
+        print(f"    [SMUGGLE]   {i.name}: {item}")
+ 
+def _act_escape(i):
+    with i.inv_lock:
+        prob = 0.04 + (0.10 if "lockpick" in i.inventory else 0) + i.reputation * 0.05
+    if random.random() < prob:
+        i.escaped = True
+        _evict(i)
+        EventLogger().log(i.id, "escape", outcome="success")
+        print(f"    [ESCAPE]    {i.name}: ESCAPED!")
+    else:
+        i.sentence_days += random.randint(5, 15)
+        _to_solitary(i, random.randint(40, 80), "escape_attempt")
+        EventLogger().log(i.id, "escape", outcome="caught")
+        print(f"    [ESCAPE]    {i.name}: caught.")
+ 
+def _act_loot(i):
+    for t in _nearby(i.current_loc, i.id):
+        if t.inventory and random.random() < 0.3:
+            _transfer(t, i, random.choice(t.inventory))
+            EventLogger().log(i.id, "riot_loot", outcome=t.name)
+            break
+ 
+ACTIONS = {
+    "move":     _act_move,
+    "work":     _act_work,
+    "eat":      _act_eat,
+    "shower":   _act_shower,
+    "trade":    _act_trade,
+    "gamble":   _act_gamble,
+    "pay_debt": _act_pay_debt,
+    "fight":    _act_fight,
+    "smuggle":  _act_smuggle,
+    "escape":   _act_escape,
+    "loot":     _act_loot,
+    "idle":     lambda i: None,
+}
+ 
+ 
