@@ -319,4 +319,139 @@ class GuardProxy(LocationAccess):
 
 PROXY = GuardProxy()
 
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 
+def _enter_loc(inmate, loc_name):
+    return PROXY.enter(inmate, loc_name)
+
+
+def _upd_rep(inmate, delta):
+    with inmate.rep_lock:
+        inmate.reputation = max(0.0, min(1.0, inmate.reputation + delta))
+
+
+def _transfer(giver, receiver, item):
+    if giver.id < receiver.id:
+        a, b = giver, receiver
+    else:
+        a, b = receiver, giver
+    with a.inv_lock:
+        with b.inv_lock:
+            if item in giver.inventory:
+                giver.inventory.remove(item)
+                receiver.inventory.append(item)
+                return True
+    return False
+
+
+def _evict(inmate):
+    loc = locs.get(inmate.current_loc)
+    if loc:
+        with loc.lock:
+            if inmate.id in loc.occupants:
+                loc.occupants.remove(inmate.id)
+    inmate.current_loc = "none"
+
+
+def _to_solitary(inmate, dur_s, reason):
+    if isinstance(inmate.state, SolitaryState):
+        return
+    _evict(inmate)
+    inmate.solitary_until = time.time() + dur_s
+    inmate.set_state(SolitaryState())
+    inmate.state.on_enter(inmate)
+    with solitary_lock:
+        if inmate.id not in solitary_q:
+            solitary_q.append(inmate.id)
+    print(f"    [SOLITARY]  {inmate.name} -> {dur_s}s ({reason})")
+
+
+def _to_infirmary(inmate, dur_s):
+    _evict(inmate)
+    inmate.recovery_until = time.time() + dur_s
+    inmate.set_state(InfirmaryState())
+    if not LocationAccess().enter(inmate, "infirmary"):
+        LocationAccess().enter(inmate, "cell_block")
+    EventLogger().log(inmate.id, "infirmary", outcome=f"{dur_s}s")
+
+
+def _nearby(loc_name, exclude=-1):
+    loc = locs.get(loc_name)
+    if not loc:
+        return []
+    result = []
+    for i in list(loc.occupants):
+        if i == exclude:
+            continue
+        if i not in inmates:
+            continue
+        inm = inmates[i]
+        if not inm.alive:
+            continue
+        if isinstance(inm.state, (SolitaryState, InfirmaryState)):
+            continue
+        result.append(inm)
+    return result
+
+
+def _inspect(guard, inmate):
+    if "cash" in inmate.inventory and random.random() < 0.35:
+        with inmate.inv_lock:
+            if "cash" in inmate.inventory:
+                inmate.inventory.remove("cash")
+        guard.bribed = True
+        guard.bribe_until = time.time() + random.uniform(20, 60)
+        EventLogger().log(inmate.id, "bribe", guard.current_loc, guard.name)
+        print(f"    [BRIBE]     {inmate.name} bribed {guard.name}.")
+        return
+    with inmate.inv_lock:
+        bad = [x for x in inmate.inventory if x in ("shiv", "drugs", "lockpick")]
+    if bad:
+        item = random.choice(bad)
+        with inmate.inv_lock:
+            if item in inmate.inventory:
+                inmate.inventory.remove(item)
+        EventLogger().log(inmate.id, "contraband_seized", guard.current_loc, f"{item}|{guard.name}")
+        print(f"    [SEIZED]    {guard.name} took {item} from {inmate.name}.")
+        if random.random() < 0.55:
+            _to_solitary(inmate, random.randint(20, 50), f"contraband_{item}")
+
+
+def _resolve_fight(attacker, defender, reason="fight"):
+    if not (attacker.alive and defender.alive):
+        return
+    if isinstance(attacker.state, (SolitaryState, InfirmaryState)):
+        return
+    if isinstance(defender.state, (SolitaryState, InfirmaryState)):
+        return
+
+    dur = random.uniform(2.0, 6.0)
+    t0  = time.time()
+    time.sleep(dur)
+    ms  = int((time.time() - t0) * 1000)
+
+    armed_atk = any(x in WEAPONS for x in attacker.inventory)
+    armed_def = any(x in WEAPONS for x in defender.inventory)
+    a_score   = attacker.reputation + (0.2 if armed_atk else 0) + random.random() * 0.4
+    d_score   = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
+
+    if a_score >= d_score:
+        w, l = attacker, defender
+    else:
+        w, l = defender, attacker
+
+    if w.id < l.id:
+        f, s = w, l
+    else:
+        f, s = l, w
+
+    with f.rep_lock:
+        with s.rep_lock:
+            w.reputation = min(1.0, w.reputation + 0.05)
+            l.reputation = max(0.0, l.reputation - 0.03)
+
+    EventLogger().log(attacker.id, "fight", attacker.current_loc,
+                      f"w={w.name},l={l.name},{reason}", ms)
+    print(f"    [FIGHT]     {attacker.name} vs {defender.name} -> {w.name} ({ms}ms) [{reason}]")
+
+    FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
