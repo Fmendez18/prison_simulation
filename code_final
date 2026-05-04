@@ -8,7 +8,7 @@ SIM_DURATION = 300
 DAY_LEN      = 10
 NUM_INMATES  = 15
 NUM_GUARDS   = 3
-NUM_GANGS    = 3
+NUM_GANGS    = 4
 DB_PATH      = "prison_events.db"
  
 LOCATION_CAPS = {
