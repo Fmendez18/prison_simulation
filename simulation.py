@@ -1,0 +1,1100 @@
+"""
+prison_simulation.py
+
+Prison Economy, Concurrent Simulation
+OS & Parallel Computing, Group Project
+
+Time Scale
+
+  10 real seconds = 1 prison day  =  300 seconds total = 30 prison days
+
+Thread Model
+
+  1 thread per inmate     — behaviour driven by reputation + randomness
+  1 thread per guard      — patrols; can be bribed
+  1 thread per gang       — recruits, fights, taxes members
+  1 event-scheduler       — fires riots, inspections, visitations
+
+Critical Regions
+
+  Location occupancy  -> threading.Lock per Location
+  Inmate inventory    -> threading.Lock per Inmate  (lower-ID-first, prevents deadlock)
+  Inmate reputation   -> threading.Lock per Inmate  (lower-ID-first)
+  Solitary queue      -> single solitary_lock
+  SQLite writes       -> single db_lock  (inside Singleton EventLogger)
+
+Intentionally NOT locked  (read-only, no state change)
+
+  Reading inmate.current_loc for display / targeting
+  Reading reputation for probability calculations
+  Individual sleep timers
+
+Design Patterns
+
+  Singleton: EventLogger: one thread-safe SQLite writer across all threads
+  State: InmateState: Free, Solitary, Parole, Riot, Infirmary
+  Chain of Responsibility: Fight consequences: Kill, Injure, Solitary, Sentence
+  Proxy: GuardProxy: intercepts location entry; enforces bribe/inspection
+
+Verified Constraints
+
+  1. Fight duration    : 2–6 seconds          (duration_ms in events table)
+  2. Location capacity : never exceeded        (capacity_snapshots, every 1 s)
+  3. Solitary sentence : served before re-entry (solitary_start/release timestamps)
+"""
+
+
+import threading, sqlite3, random, time, os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from abc import ABC, abstractmethod
+
+# CONFIGURATION
+
+SIM_DURATION = 300          # 300 s real = 30 prison days
+DAY_LEN      = 10           # 10 real seconds = 1 prison day
+NUM_INMATES  = 15
+NUM_GUARDS   = 3
+NUM_GANGS    = 3
+DB_PATH      = "prison_events.db"
+
+LOCATION_CAPS = {
+    "cell_block": 20, "cafeteria": 15, "courtyard": 15,
+    "gym": 10, "showers": 8, "workshop": 8,
+    "garden": 8, "basketball_court": 10,
+}
+CONTRABAND  = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
+WEAPONS     = {"shiv"}
+ETHNICITIES = ["black", "white", "asian", "hispanic"]
+
+NAMES_BY_ETH = {
+    "black":    ["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
+                 "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
+    "white":    ["Cody", "Travis", "Garrett", "Dustin", "Wade",
+                 "Colton", "Brayden", "Chet", "Ricky", "Dale"],
+    "asian":    ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
+                 "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
+    "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
+                 "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
+}
+
+"""
+
+Design pattern #1: Singleton: EventLogger
+Ensures exactly one SQLite connection exists across all threads.
+Uses double-checked locking for thread-safe creation.
+Every write acquires _lock, which is the critical region for the database.
+
+"""
+
+class EventLogger:
+    _inst      = None
+    _meta_lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._inst is None:
+            with cls._meta_lock:                 # outer check avoids lock cost
+                if cls._inst is None:            # inner check prevents race
+                    o = super().__new__(cls)
+                    o._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+                    o._lock = threading.Lock()
+                    o._conn.executescript("""
+                        CREATE TABLE IF NOT EXISTS events(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, event_type TEXT,
+                            location TEXT, outcome TEXT, duration_ms INTEGER);
+                        CREATE TABLE IF NOT EXISTS capacity_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            location TEXT, occupancy INTEGER, capacity INTEGER);
+                        CREATE TABLE IF NOT EXISTS reputation_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, reputation REAL);
+                    """)
+                    o._conn.commit()
+                    cls._inst = o
+        return cls._inst
+
+    def log(self, iid, etype, loc=None, outcome=None, ms=None):
+        with self._lock:                         # CRITICAL REGION: DB write
+            self._conn.execute(
+                "INSERT INTO events(timestamp,inmate_id,event_type,location,outcome,duration_ms)"
+                " VALUES(?,?,?,?,?,?)",
+                (time.time(), iid, etype, loc, outcome, ms))
+            self._conn.commit()
+
+    def snap_capacity(self, all_locs):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO capacity_snapshots(timestamp,location,occupancy,capacity)"
+                " VALUES(?,?,?,?)",
+                [(t, l.name, len(l.occupants), l.capacity) for l in all_locs])
+            self._conn.commit()
+
+    def snap_rep(self, all_inmates):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO reputation_snapshots(timestamp,inmate_id,reputation)"
+                " VALUES(?,?,?)",
+                [(t, i.id, i.reputation) for i in all_inmates if i.alive])
+            self._conn.commit()
+
+    def query(self, sql):
+        with self._lock:
+            return self._conn.execute(sql).fetchall()
+
+
+
+# DATA MODELS
+
+@dataclass
+class Location:
+    name: str; capacity: int
+    occupants: List[int] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    gang_ctrl: Optional[int] = None
+
+
+@dataclass
+class Inmate:
+    id: int; name: str; ethnicity: str
+    reputation: float        # 0.0 = calm  ->  1.0 = violent
+    sentence_days: int
+    gang_id:   Optional[int] = None
+    inventory: List[str] = field(default_factory=list)
+    alive: bool = True
+    escaped: bool = False
+    debt: int = 0
+    current_loc: str  = "cell_block"
+    solitary_until: float = 0.0
+    recovery_until: float = 0.0
+    state: "InmateState" = None
+    inv_lock: threading.Lock = field(default_factory=threading.Lock)
+    rep_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        if self.state is None:
+            self.state = FreeState()
+
+    def set_state(self, s): self.state = s
+
+
+@dataclass
+class Guard:
+    id: int; name: str
+    corrupt: bool  = False
+    bribed: bool  = False
+    bribe_until: float = 0.0
+    current_loc: str = "cell_block"
+
+
+@dataclass
+class Gang:
+    id: int; name: str; ethnicity: str
+    members: List[int] = field(default_factory=list)
+    treasury: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+# GLOBAL STATE
+
+locs: Dict[str, Location] = {}
+inmates: Dict[int, Inmate] = {}
+guards: Dict[int, Guard] = {}
+gangs: Dict[int, Gang] = {}
+
+solitary_q = []
+solitary_lock = threading.Lock()
+shutdown = threading.Event()
+riot_active = False
+lockdown = False
+
+# Design Pattern 2: State: InmateState hierarchy
+
+# The main inmate loop never checks flags directly.
+# It calls inmate.state.choose_action() and the correct state object
+# decides what to do, Free acts normally, Solitary waits, etc.
+# Transitions: inmate.set_state(NewState())  (Session 24 — State)
+
+class InmateState(ABC):
+    @abstractmethod
+    def choose_action(self, inmate: Inmate) -> str: ...
+
+
+class FreeState(InmateState):
+    """Full action menu, weighted by reputation. Default state."""
+    def choose_action(self, inmate):
+        r = inmate.reputation
+        w = {
+            "move": 1.0,
+            "work": max(0.1, 0.6 - r * 0.4),
+            "eat": 0.3,
+            "shower": 0.2,
+            "trade": 0.3,
+            "gamble": 0.2 + r * 0.2,
+            "pay_debt": 0.3 if inmate.debt > 0 else 0.0,
+            "fight": min(1.0, 0.1 + r * 0.6),
+            "smuggle": min(1.0, 0.05 + r * 0.3),
+            "escape": min(1.0, 0.02 + r * 0.1),
+            "idle": max(0.1, 0.4 - r * 0.3),
+        }
+        return random.choices(list(w), list(w.values()), k=1)[0]
+
+
+class SolitaryState(InmateState):
+
+#No actions. Polls release time; returns to Free when done.
+
+    def on_enter(self, inmate):
+        EventLogger().log(inmate.id, "solitary_start", "solitary")
+
+    def choose_action(self, inmate):
+        if time.time() >= inmate.solitary_until:
+            with solitary_lock:
+                if inmate.id in solitary_q:
+                    solitary_q.remove(inmate.id)
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+            EventLogger().log(inmate.id, "solitary_release", "cell_block")
+            print(f"    [RELEASED]  {inmate.name} out of solitary.")
+        return "idle"
+
+
+class ParoleState(InmateState):
+    """Violent actions suppressed, inmate trying to behave."""
+    _BLOCKED = {"fight", "smuggle", "escape"}
+    def choose_action(self, inmate):
+        a = FreeState().choose_action(inmate)
+        return "idle" if a in self._BLOCKED else a
+
+
+class RiotState(InmateState):
+    """Chaos: fight, loot, or idle only."""
+    def choose_action(self, inmate):
+        return random.choice(["fight", "loot", "idle"])
+
+
+class InfirmaryState(InmateState):
+    """Recovering. Transitions to Free when timer expires."""
+    def choose_action(self, inmate):
+        if time.time() >= inmate.recovery_until:
+            inmate.set_state(FreeState())
+            _enter_loc(inmate, "cell_block")
+        return "idle"
+
+
+
+# DESIGN PATTERN 3, Chain of responsibility: Fight consequences
+#
+# Each handler checks one condition. If it acts, it may stop the
+# chain (return). Otherwise it calls super().handle() to pass on.
+# Built once as FIGHT_CHAIN; reused by every fight.
+
+class FightHandler(ABC):
+    _next: "FightHandler" = None
+
+    def set_next(self, h):
+        self._next = h; return h
+
+    def handle(self, winner, loser, ctx):
+        if self._next: self._next.handle(winner, loser, ctx)
+
+
+class KillHandler(FightHandler):
+    """Loser may be killed, chain stops if so."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.05 + (0.05 if ctx.get("armed") else 0):
+            loser.alive = False
+            ctx["done"] = True
+            _upd_rep(winner, +0.10)
+            EventLogger().log(loser.id, "killed", loser.current_loc, f"by={winner.name}")
+            print(f"    [KILLED]    {loser.name} killed by {winner.name}.")
+            return
+        super().handle(winner, loser, ctx)
+
+
+class InjuryHandler(FightHandler):
+    """Loser may go to infirmary."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.20:
+            _to_infirmary(loser, random.randint(20, 40))
+            ctx["done"] = True
+            return
+        super().handle(winner, loser, ctx)
+
+
+class SolitaryHandler(FightHandler):
+    """Loser may be sent to solitary confinement."""
+    def handle(self, winner, loser, ctx):
+        if not ctx.get("done") and random.random() < 0.45:
+            _to_solitary(loser, random.randint(20, 40), "lost_fight")
+        super().handle(winner, loser, ctx)
+
+
+class SentenceHandler(FightHandler):
+    """Winner may receive an added sentence for instigating."""
+    def handle(self, winner, loser, ctx):
+        if random.random() < 0.20:
+            n = random.randint(1, 5)
+            winner.sentence_days += n
+            EventLogger().log(winner.id, "sentence_added", outcome=f"+{n}d")
+
+# Build the chain once at module level
+_chain = KillHandler()
+_chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
+FIGHT_CHAIN = _chain
+
+
+# Design Pattern #4 Proxy: GuardProxy
+
+# All movement routes through PROXY.enter(inmate, location).
+# The inmate code never knows whether a guard check occurred.
+# The proxy runs the inspection and only then delegates to the
+# real LocationAccess object.
+
+# This also demonstrates the critical region for location occupancy:
+# new_loc.lock acquired first, then old_loc.lock nested inside.
+# Always new-outer/old-inner, this prevents deadlock.
+
+class LocationAccess:
+    """Real subject, capacity-checked location move."""
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        if loc_name not in locs:
+            return False
+        new_loc = locs[loc_name]
+        old_loc = locs.get(inmate.current_loc)
+        if old_loc is new_loc:
+            return True
+        with new_loc.lock:                       # CRITICAL REGION: new outer
+            if len(new_loc.occupants) >= new_loc.capacity:
+                return False
+            if old_loc:
+                with old_loc.lock:               # nested: old inner
+                    if inmate.id in old_loc.occupants:
+                        old_loc.occupants.remove(inmate.id)
+            new_loc.occupants.append(inmate.id)
+            inmate.current_loc = loc_name
+            return True
+
+
+class GuardProxy(LocationAccess):
+    """
+    Proxy intercepts entry requests.
+    - Guard present + bribed  -> allow through, log the pass
+    - Guard present + active  -> inspect first; block if solitary triggered
+    - No guard / corrupt -> delegate straight to LocationAccess
+    """
+    _real = LocationAccess()
+
+    def enter(self, inmate: Inmate, loc_name: str) -> bool:
+        guard = next(
+            (g for g in guards.values() if g.current_loc == loc_name),
+            None)
+
+        if guard:
+            if guard.bribed:
+                EventLogger().log(inmate.id, "bribed_entry", loc_name, guard.name)
+            elif not guard.corrupt:
+                _inspect(guard, inmate)
+                if isinstance(inmate.state, SolitaryState):
+                    return False              # inspection sent them to solitary
+
+        return self._real.enter(inmate, loc_name)
+
+
+PROXY = GuardProxy()
+
+
+
+# Helpers
+
+def _enter_loc(inmate, loc_name):
+    """All movement routes through the Proxy."""
+    return PROXY.enter(inmate, loc_name)
+
+
+def _upd_rep(inmate, delta):
+    """Atomic reputation update. CRITICAL REGION: rep_lock."""
+    with inmate.rep_lock:
+        inmate.reputation = max(0.0, min(1.0, inmate.reputation + delta))
+
+
+def _transfer(giver, receiver, item) -> bool:
+    """
+    Atomic two-inventory transfer.
+    Always lock lower-ID inmate first — prevents A→B / B→A deadlock.
+    CRITICAL REGION: both inv_locks.  (Session 2 — solving deadlock)
+    """
+    a, b = (giver, receiver) if giver.id < receiver.id else (receiver, giver)
+    with a.inv_lock:
+        with b.inv_lock:
+            if item in giver.inventory:
+                giver.inventory.remove(item)
+                receiver.inventory.append(item)
+                return True
+    return False
+
+
+def _evict(inmate):
+    """Remove inmate from current location (for solitary/infirmary)."""
+    loc = locs.get(inmate.current_loc)
+    if loc:
+        with loc.lock:
+            if inmate.id in loc.occupants:
+                loc.occupants.remove(inmate.id)
+    inmate.current_loc = "none"
+
+
+def _to_solitary(inmate, dur_s, reason):
+    """Send inmate to solitary. CRITICAL REGION: solitary_lock."""
+    if isinstance(inmate.state, SolitaryState):
+        return
+    _evict(inmate)
+    inmate.solitary_until = time.time() + dur_s
+    inmate.set_state(SolitaryState())
+    inmate.state.on_enter(inmate)
+    with solitary_lock:                          # CRITICAL REGION
+        if inmate.id not in solitary_q:
+            solitary_q.append(inmate.id)
+    print(f"    [SOLITARY]  {inmate.name} → {dur_s}s ({reason})")
+
+
+def _to_infirmary(inmate, dur_s):
+    """Send inmate to infirmary to recover."""
+    _evict(inmate)
+    inmate.recovery_until = time.time() + dur_s
+    inmate.set_state(InfirmaryState())
+    if not LocationAccess().enter(inmate, "infirmary"):
+        LocationAccess().enter(inmate, "cell_block")
+    EventLogger().log(inmate.id, "infirmary", outcome=f"{dur_s}s")
+
+
+def _nearby(loc_name, exclude=-1) -> List[Inmate]:
+    """
+    Relaxed read of current location occupants, no lock needed here
+    because we are only reading for targeting.
+    """
+    loc = locs.get(loc_name)
+    if not loc: return []
+    return [inmates[i] for i in list(loc.occupants)
+            if i != exclude and i in inmates and inmates[i].alive
+            and not isinstance(inmates[i].state, (SolitaryState, InfirmaryState))]
+
+
+def _inspect(guard, inmate):
+    """Called by GuardProxy before allowing location entry."""
+    # Bribe attempt: Guard bribe status is a shared boolean, written here
+    if "cash" in inmate.inventory and random.random() < 0.35:
+        with inmate.inv_lock:
+            if "cash" in inmate.inventory:
+                inmate.inventory.remove("cash")
+        guard.bribed = True                      # Guard bribe status
+        guard.bribe_until = time.time() + random.uniform(20, 60)
+        EventLogger().log(inmate.id, "bribe", guard.current_loc, guard.name)
+        print(f"    [BRIBE]     {inmate.name} bribed {guard.name}.")
+        return
+    # Contraband seizure
+    with inmate.inv_lock:
+        bad = [x for x in inmate.inventory if x in ("shiv", "drugs", "lockpick")]
+    if bad:
+        item = random.choice(bad)
+        with inmate.inv_lock:
+            if item in inmate.inventory:
+                inmate.inventory.remove(item)
+        EventLogger().log(inmate.id, "contraband_seized",
+                          guard.current_loc, f"{item}|{guard.name}")
+        print(f"    [SEIZED]    {guard.name} took {item} from {inmate.name}.")
+        if random.random() < 0.55:
+            _to_solitary(inmate, random.randint(20, 50), f"contraband_{item}")
+
+
+def _resolve_fight(attacker, defender, reason="fight"):
+    """
+    Core fight resolution used by all fight types.
+
+    CONSTRAINT 1: duration always drawn from Uniform(2, 6) seconds.
+    Reputation updated atomically, lower-ID lock acquired first,
+    preventing concurrent reputation write races
+    Consequences delegated fully to FIGHT_CHAIN.
+    """
+    if not (attacker.alive and defender.alive): return
+    if isinstance(attacker.state, (SolitaryState, InfirmaryState)): return
+    if isinstance(defender.state, (SolitaryState, InfirmaryState)): return
+
+# CONSTRAINT 1: fight must last 2–6 seconds
+    dur = random.uniform(2.0, 6.0)
+    t0  = time.time()
+    time.sleep(dur)
+    ms  = int((time.time() - t0) * 1000)
+
+    armed_atk = any(x in WEAPONS for x in attacker.inventory)
+    armed_def = any(x in WEAPONS for x in defender.inventory)
+    a_score   = attacker.reputation + (0.2 if armed_atk else 0) + random.random() * 0.4
+    d_score   = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
+    w, l      = (attacker, defender) if a_score >= d_score else (defender, attacker)
+
+    # Atomic reputation update, lower-ID first (prevents deadlock)
+    f, s = (w, l) if w.id < l.id else (l, w)
+    with f.rep_lock:                             # CRITICAL REGION
+        with s.rep_lock:
+            w.reputation = min(1.0, w.reputation + 0.05)
+            l.reputation = max(0.0, l.reputation - 0.03)
+
+    EventLogger().log(attacker.id, "fight", attacker.current_loc,
+                      f"w={w.name},l={l.name},{reason}", ms)
+    print(f"    [FIGHT]     {attacker.name} vs {defender.name}"
+          f" → {w.name} ({ms}ms) [{reason}]")
+
+    # Delegate all consequences to the Chain of Responsibility
+    FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
+
+
+# INMATE ACTIONS
+def _act_move(i):
+    dest = random.choice(list(locs.keys()))
+    if dest != i.current_loc and _enter_loc(i, dest):
+        EventLogger().log(i.id, "move", dest)
+
+def _act_work(i):
+    time.sleep(random.uniform(1, 3))
+    i.sentence_days = max(0, i.sentence_days - 1)
+    EventLogger().log(i.id, "work", i.current_loc)
+
+def _act_eat(i):
+    if _enter_loc(i, "cafeteria"):
+        time.sleep(random.uniform(1, 2))
+        EventLogger().log(i.id, "eat", "cafeteria")
+
+def _act_shower(i):
+    if not _enter_loc(i, "showers"): return
+    time.sleep(random.uniform(1, 3))
+    # Drop-the-soap: danger scales with reputation (notorious = more enemies)
+    if random.random() < 0.02 + i.reputation * 0.04:
+        i.alive = False
+        EventLogger().log(i.id, "drop_the_soap", "showers", "eliminated")
+        print(f"    [SOAP]      {i.name} eliminated in showers.")
+    else:
+        EventLogger().log(i.id, "shower", "showers")
+    _enter_loc(i, "cell_block")
+
+def _act_trade(i):
+    targets = _nearby(i.current_loc, i.id)
+    if targets and i.inventory:
+        t    = random.choice(targets)
+        item = random.choice(i.inventory)
+        if _transfer(i, t, item):
+            EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
+            print(f"    [TRADE]     {i.name} → {t.name}: {item}")
+
+def _act_gamble(i):
+    targets = _nearby(i.current_loc, i.id)
+    if not targets: return
+    t, stake = random.choice(targets), random.randint(1, 3)
+    if random.random() > 0.5:
+        t.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"won,{stake}")
+    else:
+        i.debt += stake
+        EventLogger().log(i.id, "gamble", outcome=f"lost,{stake}")
+
+def _act_pay_debt(i):
+    p = next((x for x in ("cash", "tobacco") if x in i.inventory), None)
+    if p:
+        with i.inv_lock:
+            if p in i.inventory: i.inventory.remove(p)
+        i.debt = max(0, i.debt - 1)
+        EventLogger().log(i.id, "pay_debt", outcome=p)
+    else:
+        _upd_rep(i, -0.02)
+
+def _act_fight(i):
+    t = _nearby(i.current_loc, i.id)
+    if t: _resolve_fight(i, random.choice(t), "spontaneous")
+
+def _act_smuggle(i):
+    corrupt_here = any(g.corrupt and g.current_loc == i.current_loc for g in guards.values())
+    if random.random() < (0.55 if corrupt_here else 0.30):
+        item = random.choice(CONTRABAND)
+        with i.inv_lock: i.inventory.append(item)
+        EventLogger().log(i.id, "smuggle", outcome=item)
+        print(f"    [SMUGGLE]   {i.name}: {item}")
+
+def _act_escape(i):
+    with i.inv_lock:
+        prob = 0.04 + (0.10 if "lockpick" in i.inventory else 0) + i.reputation * 0.05
+    if random.random() < prob:
+        i.escaped = True; _evict(i)
+        EventLogger().log(i.id, "escape", outcome="success")
+        print(f"    [ESCAPE]    {i.name}: ESCAPED!")
+    else:
+        i.sentence_days += random.randint(5, 15)
+        _to_solitary(i, random.randint(40, 80), "escape_attempt")
+        EventLogger().log(i.id, "escape", outcome="caught")
+        print(f"    [ESCAPE]    {i.name}: caught.")
+
+def _act_loot(i):
+    for t in _nearby(i.current_loc, i.id):
+        if t.inventory and random.random() < 0.3:
+            _transfer(t, i, random.choice(t.inventory))
+            EventLogger().log(i.id, "riot_loot", outcome=t.name)
+            break
+
+# Dispatch table: maps action string to handler function
+_ACTIONS = {
+    "move": _act_move, "work": _act_work, "eat": _act_eat,
+    "shower": _act_shower, "trade": _act_trade, "gamble": _act_gamble,
+    "pay_debt": _act_pay_debt, "fight": _act_fight, "smuggle": _act_smuggle,
+    "escape": _act_escape, "loot": _act_loot, "idle": lambda i: None,
+}
+
+# THREAD FUNCTIONS
+
+def inmate_thread(inmate: Inmate):
+    """
+    Main inmate loop.  The State pattern drives all behaviour,
+    the loop only calls inmate.state.choose_action() and dispatches.
+    Actions are spaced around 2 seconds apart per the project spec.
+    """
+    print(f"  [SPAWN]   Inmate {inmate.name} | rep={inmate.reputation:.2f}"
+          f" | eth={inmate.ethnicity}")
+    LocationAccess().enter(inmate, "cell_block")   # bypass proxy for initial placement
+
+    while not shutdown.is_set() and inmate.alive and not inmate.escaped:
+        # Sync to global riot flag via State transition
+        if riot_active and not isinstance(inmate.state, RiotState):
+            inmate.set_state(RiotState())
+        if not riot_active and isinstance(inmate.state, RiotState):
+            inmate.set_state(FreeState())
+
+        action = inmate.state.choose_action(inmate)
+        fn = _ACTIONS.get(action)
+        if fn: fn(inmate)
+
+        # Around 2 seconds between actions (calmer inmates wait slightly longer)
+        time.sleep(max(1.0, random.uniform(1.5, 2.5) * (1.1 - inmate.reputation * 0.2)))
+
+    print(f"  [EXIT]    {inmate.name} "
+          f"({'escaped' if inmate.escaped else 'dead' if not inmate.alive else 'done'})")
+
+
+def guard_thread(guard: Guard):
+    """
+    Guard patrol loop. Patrols locations, runs inspections.
+    Bribe status is checked each cycle, if expired, resets.
+    Corrupt guards smuggle contraband in instead of inspecting.
+    """
+    print(f"  [SPAWN]   Guard {guard.name} | corrupt={guard.corrupt}")
+
+    while not shutdown.is_set():
+        # Bribe expiry check (Guard bribe status, shared write)
+        if guard.bribed and time.time() > guard.bribe_until:
+            guard.bribed = False
+            EventLogger().log(None, "bribe_expired", guard.current_loc)
+
+        guard.current_loc = random.choice(list(locs.keys()))
+
+        if guard.corrupt:
+            # Corrupt guard smuggles contraband in for an inmate
+            loc = locs.get(guard.current_loc)
+            if loc:
+                occ = [inmates[i] for i in list(loc.occupants) if i in inmates]
+                if occ:
+                    b    = random.choice(occ)
+                    item = random.choice(CONTRABAND)
+                    with b.inv_lock: b.inventory.append(item)
+                    EventLogger().log(b.id, "guard_smuggle",
+                                      guard.current_loc, f"{item}|{guard.name}")
+                    print(f"  [CORRUPT]  {guard.name} smuggled {item} to {b.name}.")
+        elif not guard.bribed:
+            loc = locs.get(guard.current_loc)
+            if loc:
+                for iid in list(loc.occupants):
+                    if iid in inmates and inmates[iid].alive:
+                        _inspect(guard, inmates[iid])
+
+        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 s
+
+    print(f"  [EXIT]    Guard {guard.name}")
+
+
+def gang_thread(gang: Gang):
+    """
+    Gang strategy loop. Gangs deliberate every 10–20 s.
+    Actions: group fight, recruit, tax members.
+    """
+    print(f"  [SPAWN]   Gang {gang.name} | eth={gang.ethnicity}")
+
+    while not shutdown.is_set():
+        time.sleep(random.uniform(10, 20))
+        if lockdown or riot_active or shutdown.is_set(): continue
+
+        action = random.choices(
+            ["fight", "recruit", "tax", "idle"],
+            weights=[0.30, 0.25, 0.25, 0.20], k=1)[0]
+
+        if action == "fight":
+            with gang.lock: ids = list(gang.members)
+            members = [inmates[m] for m in ids
+                       if m in inmates and inmates[m].alive
+                       and not isinstance(inmates[m].state,
+                                          (SolitaryState, InfirmaryState))]
+            rivals = [i for i in inmates.values()
+                      if i.alive and i.gang_id != gang.id]
+            if len(members) >= 2 and rivals:
+                atk = random.choice(members)
+                tgt = random.choice(rivals)
+                win = random.random() < 0.5 + min(0.2, 0.05 * len(members))
+                dur = random.uniform(2.0, 6.0)
+                t0  = time.time(); time.sleep(dur)
+                ms  = int((time.time() - t0) * 1000)
+                EventLogger().log(atk.id, "gang_fight", atk.current_loc,
+                                  f"win={win},t={tgt.name}", ms)
+                print(f"  [GANG]     {gang.name} vs {tgt.name}: "
+                      f"{'WIN' if win else 'LOSS'} ({ms}ms)")
+                if win:
+                    _upd_rep(atk, +0.05)
+                    if random.random() < 0.10:
+                        tgt.alive = False
+                        EventLogger().log(tgt.id, "killed", outcome=f"gang={gang.name}")
+                        print(f"  [KILLED]   {tgt.name} killed by {gang.name}.")
+                    elif random.random() < 0.35:
+                        _to_solitary(tgt, random.randint(20, 50), "gang_fight")
+                else:
+                    _upd_rep(atk, -0.04)
+
+        elif action == "recruit":
+            pool = [i for i in inmates.values()
+                    if i.gang_id is None and i.alive
+                    and i.ethnicity == gang.ethnicity]
+            if pool:
+                r = random.choice(pool)
+                with gang.lock:
+                    r.gang_id = gang.id
+                    gang.members.append(r.id)
+                _upd_rep(r, +0.05)
+                EventLogger().log(r.id, "gang_join", outcome=gang.name)
+                print(f"  [GANG]     {r.name} joined {gang.name}.")
+
+        elif action == "tax":
+            with gang.lock: ids = list(gang.members)
+            for mid in ids:
+                m = inmates.get(mid)
+                if not m or not m.alive: continue
+                p = next((x for x in ("cash", "tobacco") if x in m.inventory), None)
+                if p:
+                    with m.inv_lock:
+                        if p in m.inventory: m.inventory.remove(p)
+                    with gang.lock: gang.treasury += 1
+                    EventLogger().log(m.id, "gang_tax", outcome=p)
+                else:
+                    _upd_rep(m, -0.01)
+
+    print(f"  [EXIT]    Gang {gang.name}")
+
+def scheduler_thread():
+    """
+    Fires global prison events every 15–30 s.
+    Riot/lockdown affect all inmate threads via global flags polled
+    by inmate_thread each cycle.
+    """
+    global riot_active, lockdown
+    print("  [SPAWN]   Scheduler")
+    log  = EventLogger()
+    evts = ["riot", "lockdown", "inspection", "visitation", "parole", "arrival"]
+    wts  = [0.15,   0.10,       0.25,         0.20,        0.15,     0.15]
+
+    while not shutdown.is_set():
+        time.sleep(random.uniform(15, 30))
+        if shutdown.is_set(): break
+
+        match random.choices(evts, wts, k=1)[0]:
+
+            case "riot":
+                dur = random.uniform(20, 40)
+                print(f"\n  +++ RIOT ({dur:.0f}s) — chaos mode +++\n")
+                riot_active = True
+                log.log(None, "riot_start", outcome=f"dur={int(dur)}s")
+                time.sleep(dur)
+                riot_active = False
+                log.log(None, "riot_end")
+                # Aftermath: some inmates get added sentences + solitary
+                for i in list(inmates.values()):
+                    if i.alive and not isinstance(i.state, SolitaryState) \
+                            and random.random() < 0.30:
+                        i.sentence_days += random.randint(1, 5)
+                        _to_solitary(i, random.randint(20, 40), "riot")
+                print("  +++ RIOT ENDED +++\n")
+
+            case "lockdown":
+                dur = random.uniform(15, 30)
+                print(f"\n  +++ LOCKDOWN ({dur:.0f}s) +++\n")
+                lockdown = True
+                for g in guards.values(): g.bribed = False   # clears all bribes
+                log.log(None, "lockdown_start")
+                time.sleep(dur)
+                lockdown = False
+                log.log(None, "lockdown_end")
+
+            case "inspection":
+                print("  [EVENT]   Prison-wide inspection.")
+                for g in guards.values(): g.bribed = False
+                log.log(None, "inspection")
+                for g in guards.values():
+                    if not g.corrupt:
+                        loc = locs.get(g.current_loc)
+                        if loc:
+                            for iid in list(loc.occupants):
+                                if iid in inmates and inmates[iid].alive:
+                                    _inspect(g, inmates[iid])
+
+            case "visitation":
+                eli   = [i for i in inmates.values()
+                         if i.alive and not isinstance(i.state, SolitaryState)]
+                lucky = random.sample(eli, min(4, len(eli)))
+                for i in lucky:
+                    item = random.choice(CONTRABAND)
+                    with i.inv_lock: i.inventory.append(item)
+                    log.log(i.id, "visitation", outcome=item)
+                print(f"  [EVENT]   Visitation: {len(lucky)} inmates got contraband.")
+
+            case "parole":
+                cands = sorted(
+                    [i for i in inmates.values()
+                     if i.alive and not isinstance(i.state, ParoleState)],
+                    key=lambda x: x.sentence_days)[:2]
+                for i in cands:
+                    i.set_state(ParoleState())
+                    _upd_rep(i, -0.08)
+                    log.log(i.id, "parole_hearing")
+                    print(f"  [EVENT]   {i.name} is parole-eligible.")
+
+            case "arrival":
+                nid  = max(inmates.keys()) + 1
+                eth  = random.choice(ETHNICITIES)
+                name = random.choice(NAMES_BY_ETH[eth]) + f"_{nid}"
+                ni   = Inmate(nid, name, eth,
+                              random.uniform(0.2, 0.8), random.randint(10, 40),
+                              inventory=random.sample(CONTRABAND, random.randint(0, 2)))
+                inmates[nid] = ni
+                threading.Thread(target=inmate_thread, args=(ni,),
+                                 daemon=True, name=f"i{nid}").start()
+                log.log(nid, "new_arrival", outcome=f"rep={ni.reputation:.2f}")
+                print(f"  [EVENT]   New arrival: {name}")
+
+    print("  [EXIT]    Scheduler")
+
+
+def monitor_thread():
+    """Snapshots location occupancy every 1 s → constraint 2."""
+    log = EventLogger()
+    while not shutdown.is_set():
+        log.snap_capacity(list(locs.values()))
+        time.sleep(1)
+
+
+def rep_monitor_thread():
+    """Snapshots reputation every 2 s → reputation graphs."""
+    log = EventLogger()
+    while not shutdown.is_set():
+        log.snap_rep(list(inmates.values()))
+        time.sleep(2)
+
+
+# ─────────────────────────────────────────────────────────────────
+# WORLD BUILDER
+# ─────────────────────────────────────────────────────────────────
+NAMES       = [n for eth in ETHNICITIES for n in NAMES_BY_ETH[eth][:4]]
+GANG_NAMES  = ["Black Stone Brotherhood", "White Wall Syndicate", "East Dragon Triad"]
+GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
+
+
+def build_world():
+    for name, cap in LOCATION_CAPS.items():
+        locs[name] = Location(name, cap)
+
+    for i in range(NUM_GANGS):
+        gangs[i] = Gang(i, GANG_NAMES[i], ETHNICITIES[i % len(ETHNICITIES)])
+
+    eth_counters = {e: 0 for e in ETHNICITIES}
+    for i in range(NUM_INMATES):
+        eth = random.choice(ETHNICITIES)
+        pool = NAMES_BY_ETH[eth]
+        idx  = eth_counters[eth] % len(pool)
+        eth_counters[eth] += 1
+        name = pool[idx]
+        gid  = None
+        if random.random() < 0.60:
+            mg = [g for g in gangs.values() if g.ethnicity == eth]
+            if mg:
+                g = random.choice(mg); gid = g.id
+                with g.lock: g.members.append(i)
+        inmates[i] = Inmate(
+            i, name, eth,
+            reputation    = random.uniform(0.0, 1.0),
+            sentence_days = random.randint(10, 60),
+            gang_id       = gid,
+            inventory     = random.sample(CONTRABAND, random.randint(0, 2)),
+        )
+
+    for i in range(NUM_GUARDS):
+        corrupt = random.random() < 0.25
+        guards[i] = Guard(i, GUARD_NAMES[i % len(GUARD_NAMES)], corrupt=corrupt)
+        if corrupt:
+            print(f"  [INIT]    {GUARD_NAMES[i % len(GUARD_NAMES)]} is CORRUPT.")
+
+#Verify Constraints
+
+def verify():
+    q = EventLogger().query
+    print("\n" + "=" * 55)
+    print("  CONSTRAINT VERIFICATION")
+    print("=" * 55)
+
+    # 1. Fight duration: all duration_ms values must be in [2000, 6000]
+    total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
+    bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL"
+              " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
+    print(f"\n[1] Fight 2–6 s   → {total} fights  "
+          f"→ {'PASS ✓' if bad == 0 else f'FAIL ✗ ({bad})'}")
+
+    # 2. Location capacity: no snapshot may show occupancy > capacity
+    viol = q("SELECT location, MAX(occupancy), capacity FROM capacity_snapshots"
+             " WHERE occupancy > capacity GROUP BY location")
+    print(f"[2] Capacity      → {'PASS ✓' if not viol else f'FAIL ✗ {viol}'}")
+
+    # 3. Solitary: no 'move' event timestamped between start and release
+    early = q("""
+        SELECT COUNT(*) FROM events s
+        JOIN events r ON r.inmate_id=s.inmate_id
+                      AND r.event_type='solitary_release'
+                      AND r.timestamp>s.timestamp
+        JOIN events m ON m.inmate_id=s.inmate_id
+                      AND m.event_type='move'
+                      AND m.timestamp>s.timestamp
+                      AND m.timestamp<r.timestamp
+        WHERE s.event_type='solitary_start'
+    """)[0][0]
+    print(f"[3] Solitary      → "
+          f"{'PASS ✓' if early == 0 else f'FAIL ✗ ({early} early exits)'}")
+    print("=" * 55)
+
+#Summary
+
+def summary():
+    q = EventLogger().query
+    print(f"\n{'─'*55}")
+    print(f"  SUMMARY  ({SIM_DURATION}s = {SIM_DURATION//DAY_LEN} prison days)")
+    print(f"{'─'*55}")
+
+    print(f"\n  {'Event':<28} {'Count':>6}")
+    print("  " + "─" * 35)
+    for etype, n in q("SELECT event_type, COUNT(*) n FROM events"
+                      " GROUP BY event_type ORDER BY n DESC"):
+        print(f"  {etype:<28} {n:>6}")
+
+    alive   = sum(1 for i in inmates.values() if i.alive and not i.escaped)
+    escaped = sum(1 for i in inmates.values() if i.escaped)
+    dead    = sum(1 for i in inmates.values() if not i.alive)
+    print(f"\n  Total: {len(inmates)} | Alive: {alive} "
+          f"| Escaped: {escaped} | Dead: {dead}")
+
+    print("\n  Top 5 most notorious:")
+    for i in sorted(inmates.values(), key=lambda x: x.reputation, reverse=True)[:5]:
+        st = "alive" if i.alive else ("escaped" if i.escaped else "dead")
+        gn = gangs[i.gang_id].name if i.gang_id is not None else "none"
+        print(f"    {i.name:<14} rep={i.reputation:.2f}  {gn:<26} [{st}]")
+
+    print("\n  Gangs:")
+    for g in gangs.values():
+        print(f"    {g.name:<26} treasury={g.treasury:>3} "
+              f"members={len(g.members)}")
+
+    print(f"\n  Full log → {DB_PATH}\n{'─'*55}")
+
+# Main function
+
+def main():
+    if os.path.exists(DB_PATH): os.remove(DB_PATH)
+    EventLogger()    # initialise schema (Singleton)
+
+    print("=" * 55)
+    print("  PRISON ECONOMY SIMULATION")
+    print(f"  {SIM_DURATION}s real = {SIM_DURATION // DAY_LEN} prison days")
+    print(f"  Inmates: {NUM_INMATES}  Guards: {NUM_GUARDS}  Gangs: {NUM_GANGS}")
+    print("  Patterns: Singleton, State, Chain, Proxy")
+    print("=" * 55 + "\n")
+
+    build_world()
+
+    threads = (
+        [threading.Thread(target=inmate_thread, args=(i,),
+                          daemon=True, name=f"inmate-{i.id}") for i in inmates.values()] +
+        [threading.Thread(target=guard_thread,  args=(g,),
+                          daemon=True, name=f"guard-{g.id}")  for g in guards.values()] +
+        [threading.Thread(target=gang_thread,   args=(g,),
+                          daemon=True, name=f"gang-{g.id}")   for g in gangs.values()] +
+        [threading.Thread(target=scheduler_thread,   daemon=True, name="sched"),
+         threading.Thread(target=monitor_thread,     daemon=True, name="cap"),
+         threading.Thread(target=rep_monitor_thread, daemon=True, name="rep")]
+    )
+
+    for t in threads: t.start()
+
+    print(f"\n  Simulation running for {SIM_DURATION}s "
+          f"({SIM_DURATION // DAY_LEN} prison days)...\n")
+    time.sleep(SIM_DURATION)
+
+    shutdown.set()
+    print("\n  Shutting down...")
+    for t in threads: t.join(timeout=8)
+    print("  All threads joined.\n")
+
+    verify()
+    summary()
+
+
+if __name__ == "__main__":
+    main()
+
+# ─────────────────────────────────────────────────────────────────
+# CONSTRAINT VERIFICATION  (post-simulation SQL)
+# ─────────────────────────────────────────────────────────────────
+def verify():
+    q = EventLogger().query
+    print("\n" + "=" * 55)
+    print("  CONSTRAINT VERIFICATION")
+    print("=" * 55)
+
+    # 1. Fight duration: all duration_ms values must be in [2000, 6000]
+    total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
+    bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL"
+              " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
+    print(f"\n[1] Fight 2–6 s   → {total} fights  "
+          f"→ {'PASS ✓' if bad == 0 else f'FAIL ✗ ({bad})'}")
+
+    # 2. Location capacity: no snapshot may show occupancy > capacity
+    viol = q("SELECT location, MAX(occupancy), capacity FROM capacity_snapshots"
+             " WHERE occupancy > capacity GROUP BY location")
+    print(f"[2] Capacity      → {'PASS ✓' if not viol else f'FAIL ✗ {viol}'}")
+
+    # 3. Solitary: no 'move' event timestamped between start and release
+    early = q("""
+        SELECT COUNT(*) FROM events s
+        JOIN events r ON r.inmate_id=s.inmate_id
+                      AND r.event_type='solitary_release'
+                      AND r.timestamp>s.timestamp
+        JOIN events m ON m.inmate_id=s.inmate_id
+                      AND m.event_type='move'
+                      AND m.timestamp>s.timestamp
+                      AND m.timestamp<r.timestamp
+        WHERE s.event_type='solitary_start'
+    """)[0][0]
+    print(f"[3] Solitary      → "
+          f"{'PASS ✓' if early == 0 else f'FAIL ✗ ({early} early exits)'}")
+    print("=" * 55)
+
