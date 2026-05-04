@@ -31,3 +31,63 @@ NAMES_BY_ETH = {
     "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
                  "Camilo", "Eliseo", "Jose", "Silvio", "Naldo"],
 }
+
+# DESIGN PATTERN 1: SINGLETON 
+
+class EventLogger:
+    _inst      = None
+    _meta_lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._inst is None:
+            with cls._meta_lock:
+                if cls._inst is None:
+                    o = super().__new__(cls)
+                    o._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+                    o._lock = threading.Lock()
+                    o._conn.executescript("""
+                        CREATE TABLE IF NOT EXISTS events(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, event_type TEXT,
+                            location TEXT, outcome TEXT, duration_ms INTEGER);
+                        CREATE TABLE IF NOT EXISTS capacity_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            location TEXT, occupancy INTEGER, capacity INTEGER);
+                        CREATE TABLE IF NOT EXISTS reputation_snapshots(
+                            id INTEGER PRIMARY KEY, timestamp REAL,
+                            inmate_id INTEGER, reputation REAL);
+                    """)
+                    o._conn.commit()
+                    cls._inst = o
+        return cls._inst
+
+    def log(self, iid, etype, loc=None, outcome=None, ms=None):
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO events(timestamp,inmate_id,event_type,location,outcome,duration_ms)"
+                " VALUES(?,?,?,?,?,?)",
+                (time.time(), iid, etype, loc, outcome, ms))
+            self._conn.commit()
+
+    def snap_capacity(self, all_locs):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO capacity_snapshots(timestamp,location,occupancy,capacity)"
+                " VALUES(?,?,?,?)",
+                [(t, l.name, len(l.occupants), l.capacity) for l in all_locs])
+            self._conn.commit()
+
+    def snap_rep(self, all_inmates):
+        with self._lock:
+            t = time.time()
+            self._conn.executemany(
+                "INSERT INTO reputation_snapshots(timestamp,inmate_id,reputation)"
+                " VALUES(?,?,?)",
+                [(t, i.id, i.reputation) for i in all_inmates if i.alive])
+            self._conn.commit()
+
+    def query(self, sql):
+        with self._lock:
+            return self._conn.execute(sql).fetchall()
+
