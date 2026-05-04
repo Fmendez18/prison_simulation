@@ -143,54 +143,60 @@ class EventLogger:
 
 # DATA MODELS
 
-@dataclass
 class Location:
-    name: str; capacity: int
-    occupants: List[int] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    gang_ctrl: Optional[int] = None
+    def __init__(self, name, capacity, gang_ctrl=None):
+        self.name = name
+        self.capacity = capacity
+        self.occupants = []
+        self.lock = threading.Lock()
+        self.gang_ctrl = gang_ctrl
 
 
-@dataclass
 class Inmate:
-    id: int; name: str; ethnicity: str
-    reputation: float        # 0.0 = calm  ->  1.0 = violent
-    sentence_days: int
-    gang_id:   Optional[int] = None
-    inventory: List[str] = field(default_factory=list)
-    alive: bool = True
-    escaped: bool = False
-    debt: int = 0
-    current_loc: str  = "cell_block"
-    solitary_until: float = 0.0
-    recovery_until: float = 0.0
-    state: "InmateState" = None
-    inv_lock: threading.Lock = field(default_factory=threading.Lock)
-    rep_lock: threading.Lock = field(default_factory=threading.Lock)
+    def __init__(self, id, name, ethnicity, reputation, sentence_days,
+                 gang_id=None, inventory=None, alive=True, escaped=False,
+                 debt=0, current_loc="cell_block", solitary_until=0.0,
+                 recovery_until=0.0, state=None):
+        self.id = id
+        self.name = name
+        self.ethnicity = ethnicity
+        self.reputation = reputation
+        self.sentence_days = sentence_days
+        self.gang_id = gang_id
+        self.inventory = inventory if inventory is not None else []
+        self.alive = alive
+        self.escaped = escaped
+        self.debt = debt
+        self.current_loc = current_loc
+        self.solitary_until = solitary_until
+        self.recovery_until = recovery_until
+        self.state = state if state is not None else FreeState()
+        self.inv_lock = threading.Lock()
+        self.rep_lock = threading.Lock()
 
-    def __post_init__(self):
-        if self.state is None:
-            self.state = FreeState()
-
-    def set_state(self, s): self.state = s
+    def set_state(self, s):
+        self.state = s
 
 
-@dataclass
 class Guard:
-    id: int; name: str
-    corrupt: bool  = False
-    bribed: bool  = False
-    bribe_until: float = 0.0
-    current_loc: str = "cell_block"
+    def __init__(self, id, name, corrupt=False, bribed=False,
+                 bribe_until=0.0, current_loc="cell_block"):
+        self.id = id
+        self.name = name
+        self.corrupt = corrupt
+        self.bribed = bribed
+        self.bribe_until = bribe_until
+        self.current_loc = current_loc
 
 
-@dataclass
 class Gang:
-    id: int; name: str; ethnicity: str
-    members: List[int] = field(default_factory=list)
-    treasury: int = 0
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
+    def __init__(self, id, name, ethnicity, treasury=0):
+        self.id = id
+        self.name = name
+        self.ethnicity = ethnicity
+        self.members = []
+        self.treasury = treasury
+        self.lock = threading.Lock()
 
 # GLOBAL STATE
 
@@ -580,7 +586,7 @@ def _act_trade(i):
         item = random.choice(i.inventory)
         if _transfer(i, t, item):
             EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
-            print(f"    [TRADE]     {i.name} -> {t.name}: {item}")
+            print(f"    [TRADE]     {i.name} → {t.name}: {item}")
 
 def _act_gamble(i):
     targets = _nearby(i.current_loc, i.id)
@@ -656,7 +662,7 @@ def inmate_thread(inmate: Inmate):
     LocationAccess().enter(inmate, "cell_block")   # bypass proxy for initial placement
 
     while not shutdown.is_set() and inmate.alive and not inmate.escaped:
-        # Sync to global riot flag via state transition
+        # Sync to global riot flag via State transition
         if riot_active and not isinstance(inmate.state, RiotState):
             inmate.set_state(RiotState())
         if not riot_active and isinstance(inmate.state, RiotState):
@@ -666,7 +672,7 @@ def inmate_thread(inmate: Inmate):
         fn = _ACTIONS.get(action)
         if fn: fn(inmate)
 
-        # Around 2 seconds between actions (more relaxed inmates wait slightly longer)
+        # Around 2 seconds between actions (calmer inmates wait slightly longer)
         time.sleep(max(1.0, random.uniform(1.5, 2.5) * (1.1 - inmate.reputation * 0.2)))
 
     print(f"  [EXIT]    {inmate.name} "
@@ -682,7 +688,7 @@ def guard_thread(guard: Guard):
     print(f"  [SPAWN]   Guard {guard.name} | corrupt={guard.corrupt}")
 
     while not shutdown.is_set():
-        # Bribe expiry check (Guard bribe status)
+        # Bribe expiry check (Guard bribe status, shared write)
         if guard.bribed and time.time() > guard.bribe_until:
             guard.bribed = False
             EventLogger().log(None, "bribe_expired", guard.current_loc)
@@ -708,7 +714,7 @@ def guard_thread(guard: Guard):
                     if iid in inmates and inmates[iid].alive:
                         _inspect(guard, inmates[iid])
 
-        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 seconds
+        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 s
 
     print(f"  [EXIT]    Guard {guard.name}")
 
@@ -819,7 +825,7 @@ def scheduler_thread():
                             and random.random() < 0.30:
                         i.sentence_days += random.randint(1, 5)
                         _to_solitary(i, random.randint(20, 40), "riot")
-                print(" RIOT ENDED \n")
+                print("  +++ RIOT ENDED +++\n")
 
             case "lockdown":
                 dur = random.uniform(15, 30)
@@ -881,7 +887,7 @@ def scheduler_thread():
 
 
 def monitor_thread():
-    """Snapshots location occupancy every 1 s -> constraint 2."""
+    """Snapshots location occupancy every 1 s → constraint 2."""
     log = EventLogger()
     while not shutdown.is_set():
         log.snap_capacity(list(locs.values()))
@@ -889,15 +895,16 @@ def monitor_thread():
 
 
 def rep_monitor_thread():
-    """Snapshots reputation every 2 s -> reputation graphs."""
+    """Snapshots reputation every 2 s → reputation graphs."""
     log = EventLogger()
     while not shutdown.is_set():
         log.snap_rep(list(inmates.values()))
         time.sleep(2)
 
 
+# ─────────────────────────────────────────────────────────────────
 # WORLD BUILDER
-
+# ─────────────────────────────────────────────────────────────────
 NAMES       = [n for eth in ETHNICITIES for n in NAMES_BY_ETH[eth][:4]]
 GANG_NAMES  = ["Black Stone Brotherhood", "White Wall Syndicate", "East Dragon Triad"]
 GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
@@ -951,13 +958,13 @@ def verify():
     bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
               "('fight','gang_fight') AND duration_ms IS NOT NULL"
               " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
-    print(f"\n[1] Fight 2–6 s   -> {total} fights  "
-          f"→ {'PASS ' if bad == 0 else f'FAIL ({bad})'}")
+    print(f"\n[1] Fight 2–6 s   → {total} fights  "
+          f"→ {'PASS ✓' if bad == 0 else f'FAIL ✗ ({bad})'}")
 
     # 2. Location capacity: no snapshot may show occupancy > capacity
     viol = q("SELECT location, MAX(occupancy), capacity FROM capacity_snapshots"
              " WHERE occupancy > capacity GROUP BY location")
-    print(f"[2] Capacity      -> {'PASS ' if not viol else f'FAIL {viol}'}")
+    print(f"[2] Capacity      → {'PASS ✓' if not viol else f'FAIL ✗ {viol}'}")
 
     # 3. Solitary: no 'move' event timestamped between start and release
     early = q("""
@@ -971,8 +978,8 @@ def verify():
                       AND m.timestamp<r.timestamp
         WHERE s.event_type='solitary_start'
     """)[0][0]
-    print(f"[3] Solitary      -> "
-          f"{'PASS ' if early == 0 else f'FAIL ({early} early exits)'}")
+    print(f"[3] Solitary      → "
+          f"{'PASS ✓' if early == 0 else f'FAIL ✗ ({early} early exits)'}")
     print("=" * 55)
 
 #Summary
@@ -995,7 +1002,7 @@ def summary():
     print(f"\n  Total: {len(inmates)} | Alive: {alive} "
           f"| Escaped: {escaped} | Dead: {dead}")
 
-    print("\n  Top 5 most feared & notorious:")
+    print("\n  Top 5 most notorious:")
     for i in sorted(inmates.values(), key=lambda x: x.reputation, reverse=True)[:5]:
         st = "alive" if i.alive else ("escaped" if i.escaped else "dead")
         gn = gangs[i.gang_id].name if i.gang_id is not None else "none"
@@ -1006,7 +1013,7 @@ def summary():
         print(f"    {g.name:<26} treasury={g.treasury:>3} "
               f"members={len(g.members)}")
 
-    print(f"\n  Full log -> {DB_PATH}\n{'─'*55}")
+    print(f"\n  Full log → {DB_PATH}\n{'─'*55}")
 
 # Main function
 
@@ -1052,42 +1059,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# CONSTRAINT VERIFICATION  (post-simulation SQL)
-
-def verify():
-    q = EventLogger().query
-    print("\n" + "=" * 55)
-    print("  CONSTRAINT VERIFICATION")
-    print("=" * 55)
-
-    # 1. Fight duration: all duration_ms values must be in [2000, 6000]
-    total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
-              "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
-    bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
-              "('fight','gang_fight') AND duration_ms IS NOT NULL"
-              " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
-    print(f"\n[1] Fight 2–6 s   -> {total} fights  "
-          f" -> {'PASS ' if bad == 0 else f'FAIL ({bad})'}")
-
-    # 2. Location capacity: no snapshot may show occupancy > capacity
-    viol = q("SELECT location, MAX(occupancy), capacity FROM capacity_snapshots"
-             " WHERE occupancy > capacity GROUP BY location")
-    print(f"[2] Capacity      -> {'PASS ' if not viol else f'FAIL {viol}'}")
-
-    # 3. Solitary: no 'move' event timestamped between start and release
-    early = q("""
-        SELECT COUNT(*) FROM events s
-        JOIN events r ON r.inmate_id=s.inmate_id
-                      AND r.event_type='solitary_release'
-                      AND r.timestamp>s.timestamp
-        JOIN events m ON m.inmate_id=s.inmate_id
-                      AND m.event_type='move'
-                      AND m.timestamp>s.timestamp
-                      AND m.timestamp<r.timestamp
-        WHERE s.event_type='solitary_start'
-    """)[0][0]
-    print(f"[3] Solitary      -> "
-          f"{'PASS' if early == 0 else f'FAIL ({early} early exits)'}")
-    print("=" * 55)
 
