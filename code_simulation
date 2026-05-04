@@ -846,3 +846,42 @@ def build_world():
             print(f"  [INIT]    {GUARD_NAMES[i % len(GUARD_NAMES)]} is CORRUPT.")
 
 
+# ─────────────────────────────────────────────────────────────────
+# CONSTRAINT VERIFICATION  (post-simulation SQL)
+# ─────────────────────────────────────────────────────────────────
+def verify():
+    q = EventLogger().query
+    print("\n" + "=" * 55)
+    print("  CONSTRAINT VERIFICATION")
+    print("=" * 55)
+
+    # 1. Fight duration: all duration_ms values must be in [2000, 6000]
+    total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
+    bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+              "('fight','gang_fight') AND duration_ms IS NOT NULL"
+              " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
+    print(f"\n[1] Fight 2–6 s   → {total} fights  "
+          f"→ {'PASS ✓' if bad == 0 else f'FAIL ✗ ({bad})'}")
+
+    # 2. Location capacity: no snapshot may show occupancy > capacity
+    viol = q("SELECT location, MAX(occupancy), capacity FROM capacity_snapshots"
+             " WHERE occupancy > capacity GROUP BY location")
+    print(f"[2] Capacity      → {'PASS ✓' if not viol else f'FAIL ✗ {viol}'}")
+
+    # 3. Solitary: no 'move' event timestamped between start and release
+    early = q("""
+        SELECT COUNT(*) FROM events s
+        JOIN events r ON r.inmate_id=s.inmate_id
+                      AND r.event_type='solitary_release'
+                      AND r.timestamp>s.timestamp
+        JOIN events m ON m.inmate_id=s.inmate_id
+                      AND m.event_type='move'
+                      AND m.timestamp>s.timestamp
+                      AND m.timestamp<r.timestamp
+        WHERE s.event_type='solitary_start'
+    """)[0][0]
+    print(f"[3] Solitary      → "
+          f"{'PASS ✓' if early == 0 else f'FAIL ✗ ({early} early exits)'}")
+    print("=" * 55)
+
