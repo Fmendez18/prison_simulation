@@ -580,7 +580,7 @@ def _act_trade(i):
         item = random.choice(i.inventory)
         if _transfer(i, t, item):
             EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
-            print(f"    [TRADE]     {i.name} → {t.name}: {item}")
+            print(f"    [TRADE]     {i.name} -> {t.name}: {item}")
 
 def _act_gamble(i):
     targets = _nearby(i.current_loc, i.id)
@@ -656,7 +656,7 @@ def inmate_thread(inmate: Inmate):
     LocationAccess().enter(inmate, "cell_block")   # bypass proxy for initial placement
 
     while not shutdown.is_set() and inmate.alive and not inmate.escaped:
-        # Sync to global riot flag via State transition
+        # Sync to global riot flag via state transition
         if riot_active and not isinstance(inmate.state, RiotState):
             inmate.set_state(RiotState())
         if not riot_active and isinstance(inmate.state, RiotState):
@@ -666,7 +666,7 @@ def inmate_thread(inmate: Inmate):
         fn = _ACTIONS.get(action)
         if fn: fn(inmate)
 
-        # Around 2 seconds between actions (calmer inmates wait slightly longer)
+        # Around 2 seconds between actions (more relaxed inmates wait slightly longer)
         time.sleep(max(1.0, random.uniform(1.5, 2.5) * (1.1 - inmate.reputation * 0.2)))
 
     print(f"  [EXIT]    {inmate.name} "
@@ -682,7 +682,7 @@ def guard_thread(guard: Guard):
     print(f"  [SPAWN]   Guard {guard.name} | corrupt={guard.corrupt}")
 
     while not shutdown.is_set():
-        # Bribe expiry check (Guard bribe status, shared write)
+        # Bribe expiry check (Guard bribe status)
         if guard.bribed and time.time() > guard.bribe_until:
             guard.bribed = False
             EventLogger().log(None, "bribe_expired", guard.current_loc)
@@ -708,7 +708,7 @@ def guard_thread(guard: Guard):
                     if iid in inmates and inmates[iid].alive:
                         _inspect(guard, inmates[iid])
 
-        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 s
+        time.sleep(random.uniform(4, 8))   # guards patrol every 4–8 seconds
 
     print(f"  [EXIT]    Guard {guard.name}")
 
@@ -819,7 +819,7 @@ def scheduler_thread():
                             and random.random() < 0.30:
                         i.sentence_days += random.randint(1, 5)
                         _to_solitary(i, random.randint(20, 40), "riot")
-                print("  +++ RIOT ENDED +++\n")
+                print(" RIOT ENDED \n")
 
             case "lockdown":
                 dur = random.uniform(15, 30)
@@ -881,7 +881,7 @@ def scheduler_thread():
 
 
 def monitor_thread():
-    """Snapshots location occupancy every 1 s → constraint 2."""
+    """Snapshots location occupancy every 1 s -> constraint 2."""
     log = EventLogger()
     while not shutdown.is_set():
         log.snap_capacity(list(locs.values()))
@@ -889,16 +889,15 @@ def monitor_thread():
 
 
 def rep_monitor_thread():
-    """Snapshots reputation every 2 s → reputation graphs."""
+    """Snapshots reputation every 2 s -> reputation graphs."""
     log = EventLogger()
     while not shutdown.is_set():
         log.snap_rep(list(inmates.values()))
         time.sleep(2)
 
 
-# ─────────────────────────────────────────────────────────────────
 # WORLD BUILDER
-# ─────────────────────────────────────────────────────────────────
+
 NAMES       = [n for eth in ETHNICITIES for n in NAMES_BY_ETH[eth][:4]]
 GANG_NAMES  = ["Black Stone Brotherhood", "White Wall Syndicate", "East Dragon Triad"]
 GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
