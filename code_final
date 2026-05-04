@@ -29,7 +29,7 @@ NAMES_BY_ETH = {
     "asian":    ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
                  "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
     "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
-                 "Camilo", "Eliseo", "Jose", "Silvio", "Naldo"],
+                 "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
 }
 
 # DESIGN PATTERN 1: SINGLETON 
