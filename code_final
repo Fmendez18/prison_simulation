@@ -5,11 +5,11 @@ import time
 import os
  
 SIM_DURATION = 300
-DAY_LEN      = 10
-NUM_INMATES  = 15
-NUM_GUARDS   = 3
-NUM_GANGS    = 4
-DB_PATH      = "prison_events.db"
+DAY_LEN = 10
+NUM_INMATES = 15
+NUM_GUARDS = 3
+NUM_GANGS = 4
+DB_PATH = "prison_events.db"
  
 LOCATION_CAPS = {
     "cell_block": 20, "cafeteria": 15, "courtyard": 15,
@@ -17,25 +17,25 @@ LOCATION_CAPS = {
     "garden": 8, "basketball_court": 10,
 }
  
-CONTRABAND  = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
-WEAPONS     = {"shiv"}
+CONTRABAND = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
+WEAPONS = {"shiv"}
 ETHNICITIES = ["black", "white", "asian", "hispanic"]
  
 NAMES_BY_ETH = {
-    "black":    ["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
-                 "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
-    "white":    ["Cody", "Travis", "Garrett", "Dustin", "Wade",
-                 "Colton", "Brayden", "Chet", "Ricky", "Dale"],
-    "asian":    ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
-                 "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
-    "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
-                 "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
+    "black":["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
+             "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
+    "white":["Cody", "Travis", "Garrett", "Dustin", "Wade",
+             "Colton", "Brayden", "Chet", "Ricky", "Dale"],
+    "asian":["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
+             "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
+    "hispanic":["Rodrigo", "Ernesto", "Cesar", "Ignacio",
+                "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
 }
 
 # DESIGN PATTERN 1: SINGLETON 
 
 class EventLogger:
-    _inst      = None
+    _inst = None
     _meta_lock = threading.Lock()
 
     def __new__(cls):
@@ -192,7 +192,7 @@ class SolitaryState:
             inmate.set_state(FreeState())
             _enter_loc(inmate, "cell_block")
             EventLogger().log(inmate.id, "solitary_release", "cell_block")
-            print(f"    [RELEASED]  {inmate.name} out of solitary.")
+            print(f"  [RELEASED]  {inmate.name} out of solitary.")
         return "idle"
  
  
@@ -332,9 +332,9 @@ def _upd_rep(inmate, delta):
 
 def _transfer(giver, receiver, item):
     if giver.id < receiver.id:
-        a, b = giver, receiver
+        a,b = giver, receiver
     else:
-        a, b = receiver, giver
+        a,b = receiver, giver
     with a.inv_lock:
         with b.inv_lock:
             if item in giver.inventory:
@@ -432,16 +432,16 @@ def _resolve_fight(attacker, defender, reason="fight"):
 
     armed_atk = any(x in WEAPONS for x in attacker.inventory)
     armed_def = any(x in WEAPONS for x in defender.inventory)
-    a_score   = attacker.reputation + (0.2 if armed_atk else 0) + random.random() * 0.4
-    d_score   = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
+    a_score = attacker.reputation + (0.2 if armed_atk else 0) + random.random() * 0.4
+    d_score = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
 
     if a_score >= d_score:
-        w, l = attacker, defender
+        w,l = attacker, defender
     else:
-        w, l = defender, attacker
+        w,l = defender, attacker
 
     if w.id < l.id:
-        f, s = w, l
+        f,s = w, l
     else:
         f, s = l, w
 
@@ -452,7 +452,7 @@ def _resolve_fight(attacker, defender, reason="fight"):
 
     EventLogger().log(attacker.id, "fight", attacker.current_loc,
                       f"w={w.name},l={l.name},{reason}", ms)
-    print(f"    [FIGHT]     {attacker.name} vs {defender.name} -> {w.name} ({ms}ms) [{reason}]")
+    print(f"   [FIGHT]     {attacker.name} vs {defender.name} -> {w.name} ({ms}ms) [{reason}]")
 
     FIGHT_CHAIN.handle(w, l, {"armed": armed_atk})
 
@@ -489,17 +489,17 @@ def _act_shower(i):
 def _act_trade(i):
     targets = _nearby(i.current_loc, i.id)
     if targets and i.inventory:
-        t    = random.choice(targets)
+        t = random.choice(targets)
         item = random.choice(i.inventory)
         if _transfer(i, t, item):
             EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
-            print(f"    [TRADE]     {i.name} -> {t.name}: {item}")
+            print(f"   [TRADE]     {i.name} -> {t.name}: {item}")
  
 def _act_gamble(i):
     targets = _nearby(i.current_loc, i.id)
     if not targets:
         return
-    t     = random.choice(targets)
+    t = random.choice(targets)
     stake = random.randint(1, 3)
     if random.random() > 0.5:
         t.debt += stake
@@ -559,18 +559,18 @@ def _act_loot(i):
             break
  
 ACTIONS = {
-    "move":     _act_move,
-    "work":     _act_work,
-    "eat":      _act_eat,
-    "shower":   _act_shower,
-    "trade":    _act_trade,
-    "gamble":   _act_gamble,
+    "move": _act_move,
+    "work": _act_work,
+    "eat": _act_eat,
+    "shower": _act_shower,
+    "trade": _act_trade,
+    "gamble": _act_gamble,
     "pay_debt": _act_pay_debt,
-    "fight":    _act_fight,
-    "smuggle":  _act_smuggle,
-    "escape":   _act_escape,
-    "loot":     _act_loot,
-    "idle":     lambda i: None,
+    "fight": _act_fight,
+    "smuggle": _act_smuggle,
+    "escape": _act_escape,
+    "loot": _act_loot,
+    "idle": lambda i: None,
 }
  
 
@@ -612,7 +612,7 @@ def guard_thread(guard):
             if loc:
                 occ = [inmates[i] for i in list(loc.occupants) if i in inmates]
                 if occ:
-                    b    = random.choice(occ)
+                    b = random.choice(occ)
                     item = random.choice(CONTRABAND)
                     with b.inv_lock:
                         b.inventory.append(item)
@@ -713,9 +713,9 @@ def gang_thread(gang):
 def scheduler_thread():
     global riot_active, lockdown
     print("  [SPAWN]   Scheduler")
-    log  = EventLogger()
+    log = EventLogger()
     evts = ["riot", "lockdown", "inspection", "visitation", "parole", "arrival"]
-    wts  = [0.15,    0.10,       0.25,         0.20,        0.15,     0.15]
+    wts = [0.15,    0.10,       0.25,         0.20,        0.15,     0.15]
 
     while not shutdown.is_set():
         time.sleep(random.uniform(15, 30))
@@ -763,7 +763,7 @@ def scheduler_thread():
                                 _inspect(g, inmates[iid])
 
         elif event == "visitation":
-            eli   = [i for i in inmates.values()
+            eli = [i for i in inmates.values()
                      if i.alive and not isinstance(i.state, SolitaryState)]
             lucky = random.sample(eli, min(4, len(eli)))
             for i in lucky:
@@ -785,10 +785,10 @@ def scheduler_thread():
                 print(f"  [EVENT]   {i.name} is parole-eligible.")
 
         elif event == "arrival":
-            nid  = max(inmates.keys()) + 1
-            eth  = random.choice(ETHNICITIES)
+            nid = max(inmates.keys()) + 1
+            eth = random.choice(ETHNICITIES)
             name = random.choice(NAMES_BY_ETH[eth]) + f"_{nid}"
-            ni   = Inmate(nid, name, eth,
+            ni = Inmate(nid, name, eth,
                           random.uniform(0.2, 0.8),
                           random.randint(10, 40),
                           inventory=random.sample(CONTRABAND, random.randint(0, 2)))
@@ -816,7 +816,7 @@ def rep_monitor_thread():
 
 # ── WORLD BUILDER ─────────────────────────────────────────────────────────────
 
-GANG_NAMES  = ["O-Block", "Aryan Brotherhood", "Asian Boys", "Mara Salvatrucha"]
+GANG_NAMES = ["O-Block", "Aryan Brotherhood", "Asian Boys", "Mara Salvatrucha"]
 GUARD_NAMES = ["Officer Smith", "Officer Jones", "Sgt. Williams"]
 
 
@@ -829,15 +829,15 @@ def build_world():
 
     eth_counters = {e: 0 for e in ETHNICITIES}
     for i in range(NUM_INMATES):
-        eth  = random.choice(ETHNICITIES)
+        eth = random.choice(ETHNICITIES)
         pool = NAMES_BY_ETH[eth]
         name = pool[eth_counters[eth] % len(pool)]
         eth_counters[eth] += 1
-        gid  = None
+        gid = None
         if random.random() < 0.60:
             mg = [g for g in gangs.values() if g.ethnicity == eth]
             if mg:
-                g   = random.choice(mg)
+                g = random.choice(mg)
                 gid = g.id
                 with g.lock:
                     g.members.append(i)
@@ -845,7 +845,7 @@ def build_world():
             i, name, eth,
             random.uniform(0.0, 1.0),
             random.randint(10, 60),
-            gang_id   = gid,
+            gang_id = gid,
             inventory = random.sample(CONTRABAND, random.randint(0, 2)),
         )
 
@@ -866,7 +866,7 @@ def verify():
 
     total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
               "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
-    bad   = q("SELECT COUNT(*) FROM events WHERE event_type IN"
+    bad = q("SELECT COUNT(*) FROM events WHERE event_type IN"
               "('fight','gang_fight') AND duration_ms IS NOT NULL"
               " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
     if bad == 0:
@@ -913,20 +913,20 @@ def summary():
     for etype, n in q("SELECT event_type, COUNT(*) n FROM events GROUP BY event_type ORDER BY n DESC"):
         print(f"  {etype:<28} {n:>6}")
 
-    alive   = sum(1 for i in inmates.values() if i.alive and not i.escaped)
+    alive = sum(1 for i in inmates.values() if i.alive and not i.escaped)
     escaped = sum(1 for i in inmates.values() if i.escaped)
-    dead    = sum(1 for i in inmates.values() if not i.alive)
+    dead = sum(1 for i in inmates.values() if not i.alive)
     print(f"\n  Total: {len(inmates)} | Alive: {alive} | Escaped: {escaped} | Dead: {dead}")
 
     print("\n  Top 5 most feared:")
     for i in sorted(inmates.values(), key=lambda x: x.reputation, reverse=True)[:5]:
         st = "alive" if i.alive else ("escaped" if i.escaped else "dead")
         gn = gangs[i.gang_id].name if i.gang_id is not None else "none"
-        print(f"    {i.name:<14} rep={i.reputation:.2f}  {gn:<26} [{st}]")
+        print(f"{i.name:<14} rep={i.reputation:.2f}  {gn:<26} [{st}]")
 
     print("\n  Gangs:")
     for g in gangs.values():
-        print(f"    {g.name:<26} treasury={g.treasury:>3} members={len(g.members)}")
+        print(f"{g.name:<26} treasury={g.treasury:>3} members={len(g.members)}")
 
     print(f"\n  Full log -> {DB_PATH}\n{'─'*55}")
 
@@ -939,10 +939,10 @@ def main():
     EventLogger()
 
     print("=" * 55)
-    print("  PRISON ECONOMY SIMULATION")
-    print(f"  {SIM_DURATION}s real = {SIM_DURATION // DAY_LEN} prison days")
-    print(f"  Inmates: {NUM_INMATES}  Guards: {NUM_GUARDS}  Gangs: {NUM_GANGS}")
-    print("  Patterns: Singleton, State, Chain, Proxy")
+    print("PRISON ECONOMY SIMULATION")
+    print(f"{SIM_DURATION}s real = {SIM_DURATION // DAY_LEN} prison days")
+    print(f"Inmates: {NUM_INMATES}  Guards: {NUM_GUARDS}  Gangs: {NUM_GANGS}")
+    print("Patterns: Singleton, State, Chain, Proxy")
     print("=" * 55 + "\n")
 
     build_world()
