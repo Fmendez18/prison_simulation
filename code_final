@@ -785,7 +785,7 @@ def scheduler_thread():
                 print(f"  [EVENT]   {i.name} is parole-eligible.")
 
         elif event == "arrival":
-            nid = max(inmates.keys()) + 1
+            nid = max(inmates.keys()) + 2
             eth = random.choice(ETHNICITIES)
             name = random.choice(NAMES_BY_ETH[eth]) + f"_{nid}"
             ni = Inmate(nid, name, eth,
