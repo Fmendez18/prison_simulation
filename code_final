@@ -663,12 +663,7 @@ def gang_thread(gang):
                 print(f"  [GANG]     {gang.name} vs {tgt.name}: {'WIN' if win else 'LOSS'} ({ms}ms)")
                 if win:
                     _upd_rep(atk, +0.05)
-                    if random.random() < 0.10:
-                        tgt.alive = False
-                        EventLogger().log(tgt.id, "killed", outcome=f"gang={gang.name}")
-                        print(f"  [KILLED]   {tgt.name} killed by {gang.name}.")
-                    elif random.random() < 0.35:
-                        _to_solitary(tgt, random.randint(20, 50), "gang_fight")
+                    FIGHT_CHAIN.handle(atk, tgt, {"armed": False})
                 else:
                     _upd_rep(atk, -0.04)
 
