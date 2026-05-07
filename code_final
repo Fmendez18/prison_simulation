@@ -14,7 +14,7 @@ DB_PATH = "prison_events.db"
 LOCATION_CAPS = {
     "cell_block": 20, "cafeteria": 15, "courtyard": 15,
     "gym": 10, "showers": 8, "workshop": 8,
-    "garden": 8, "basketball_court": 10,
+    "garden": 8, "basketball_court": 10, "infirmary": 12,
 }
  
 CONTRABAND = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
