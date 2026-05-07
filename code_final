@@ -588,6 +588,10 @@ def inmate_thread(inmate):
         if not riot_active and isinstance(inmate.state, RiotState):
             inmate.set_state(FreeState())
 
+        if lockdown:
+            time.sleep(0.5)
+            continue
+
         action = inmate.state.choose_action(inmate)
         fn = ACTIONS.get(action)
         if fn:
