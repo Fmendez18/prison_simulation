@@ -470,9 +470,10 @@ def _act_work(i):
     EventLogger().log(i.id, "work", i.current_loc)
  
 def _act_eat(i):
-    if _enter_loc(i, "cafeteria"):
-        time.sleep(random.uniform(1, 2))
-        EventLogger().log(i.id, "eat", "cafeteria")
+    if not _enter_loc(i, "cafeteria"):
+        return
+    time.sleep(random.uniform(1, 2))
+    EventLogger().log(i.id, "eat", "cafeteria")
  
 def _act_shower(i):
     if not _enter_loc(i, "showers"):
