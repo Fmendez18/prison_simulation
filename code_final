@@ -877,22 +877,28 @@ def verify():
     else:
         print(f"[2] Capacity      -> FAIL {viol}")
 
+
     early = q("""
         SELECT COUNT(*) FROM events s
         JOIN events r ON r.inmate_id=s.inmate_id
                       AND r.event_type='solitary_release'
                       AND r.timestamp>s.timestamp
+                      AND r.timestamp = (
+                          SELECT MIN(r2.timestamp) FROM events r2
+                          WHERE r2.inmate_id=s.inmate_id
+                          AND r2.event_type='solitary_release'
+                          AND r2.timestamp>s.timestamp)
         JOIN events m ON m.inmate_id=s.inmate_id
                       AND m.event_type='move'
                       AND m.timestamp>s.timestamp
                       AND m.timestamp<r.timestamp
-        WHERE s.event_type='solitary_start'
+        WHERE s.event_type='solitary_start' 
     """)[0][0]
+
     if early == 0:
         print("[3] Solitary      -> PASS")
     else:
         print(f"[3] Solitary      -> FAIL ({early} early exits)")
-
     print("=" * 55)
 
 
