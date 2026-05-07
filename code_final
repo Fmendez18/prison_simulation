@@ -97,7 +97,7 @@ class Location:
         self.capacity = capacity
         self.occupants = []
         self.lock = threading.Lock()
-        self.gang_ctrl = gang_ctrl
+        
 
 
 class Inmate:
