@@ -916,7 +916,7 @@ def summary():
 
     print("\n  Top 5 most feared:")
     for i in sorted(inmates.values(), key=lambda x: x.reputation, reverse=True)[:5]:
-        st = "alive" if i.alive else ("escaped" if i.escaped else "dead")
+        st = "escaped" if i.escaped else "alive" if i.alive else "dead"
         gn = gangs[i.gang_id].name if i.gang_id is not None else "none"
         print(f"{i.name:<14} rep={i.reputation:.2f}  {gn:<26} [{st}]")
 
