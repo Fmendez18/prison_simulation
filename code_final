@@ -3,36 +3,37 @@ import sqlite3
 import random
 import time
 import os
- 
+
 SIM_DURATION = 300
 DAY_LEN = 10
 NUM_INMATES = 15
 NUM_GUARDS = 3
 NUM_GANGS = 4
 DB_PATH = "prison_events.db"
- 
+
 LOCATION_CAPS = {
     "cell_block": 20, "cafeteria": 15, "courtyard": 15,
     "gym": 10, "showers": 8, "workshop": 8,
     "garden": 8, "basketball_court": 10, "infirmary": 7,
 }
- 
+
 CONTRABAND = ["shiv", "drugs", "phone", "lockpick", "cash", "tobacco"]
 WEAPONS = {"shiv"}
 ETHNICITIES = ["black", "white", "asian", "hispanic"]
- 
+
 NAMES_BY_ETH = {
-    "black":["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
-             "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
-    "white":["Cody", "Travis", "Garrett", "Dustin", "Wade",
-             "Colton", "Brayden", "Chet", "Ricky", "Dale"],
-    "asian":["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
-             "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
-    "hispanic":["Rodrigo", "Ernesto", "Cesar", "Ignacio",
-                "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
+    "black": ["Jamal", "DeShawn", "Quantez", "Darnell", "Kevon",
+              "Lamar", "Rasheed", "Tyrell", "Malik", "Terron"],
+    "white": ["Cody", "Travis", "Garrett", "Dustin", "Wade",
+              "Colton", "Brayden", "Chet", "Ricky", "Dale"],
+    "asian": ["Xing", "Bojing", "Kenshin", "Minh", "Taeyang",
+              "Jiro", "Sung-Ho", "Daisuke", "Wei", "Ryu"],
+    "hispanic": ["Rodrigo", "Ernesto", "Cesar", "Ignacio",
+                 "Camilo", "Eliseo", "Jose Antonio Garcia Escandon", "Silvio", "Naldo"],
 }
 
-# DESIGN PATTERN 1: SINGLETON 
+
+# DESIGN PATTERN 1: SINGLETON
 
 class EventLogger:
     _inst = None
@@ -91,13 +92,13 @@ class EventLogger:
         with self._lock:
             return self._conn.execute(sql).fetchall()
 
+
 class Location:
     def __init__(self, name, capacity, gang_ctrl=None):
         self.name = name
         self.capacity = capacity
         self.occupants = []
         self.lock = threading.Lock()
-        
 
 
 class Inmate:
@@ -126,13 +127,13 @@ class Inmate:
         self.state = s
 
 
+
 class Guard:
-    def __init__(self, id, name, corrupt=False, bribed=False,
-                 bribe_until=0.0, current_loc="cell_block"):
+    def __init__(self, id, name, corrupt=False, bribe_until=0.0, current_loc="cell_block"):
         self.id = id
         self.name = name
         self.corrupt = corrupt
-        self.bribed = bribed
+        self.bribed_by = set()
         self.bribe_until = bribe_until
         self.current_loc = current_loc
 
@@ -145,6 +146,7 @@ class Gang:
         self.members = []
         self.treasury = treasury
         self.lock = threading.Lock()
+
 
 # GLOBAL STATE
 
@@ -159,31 +161,32 @@ shutdown = threading.Event()
 riot_active = False
 lockdown = False
 
+
 # ── DESIGN PATTERN 2: STATE ───────────────────────────────────────────────────
- 
+
 class FreeState:
     def choose_action(self, inmate):
         r = inmate.reputation
         w = {
-            "move":     1.0,
-            "work":     max(0.1, 0.6 - r * 0.4),
-            "eat":      0.3,
-            "shower":   0.2,
-            "trade":    0.3,
-            "gamble":   0.2 + r * 0.2,
+            "move": 1.0,
+            "work": max(0.1, 0.6 - r * 0.4),
+            "eat": 0.3,
+            "shower": 0.2,
+            "trade": 0.3,
+            "gamble": 0.2 + r * 0.2,
             "pay_debt": 0.3 if inmate.debt > 0 else 0.0,
-            "fight":    min(1.0, 0.1 + r * 0.6),
-            "smuggle":  min(1.0, 0.05 + r * 0.3),
-            "escape":   min(1.0, 0.02 + r * 0.1),
-            "idle":     max(0.1, 0.4 - r * 0.3),
+            "fight": min(1.0, 0.1 + r * 0.6),
+            "smuggle": min(1.0, 0.05 + r * 0.3),
+            "escape": min(1.0, 0.02 + r * 0.1),
+            "idle": max(0.1, 0.4 - r * 0.3),
         }
         return random.choices(list(w), list(w.values()), k=1)[0]
- 
- 
+
+
 class SolitaryState:
     def on_enter(self, inmate):
         EventLogger().log(inmate.id, "solitary_start", "solitary")
- 
+
     def choose_action(self, inmate):
         if time.time() >= inmate.solitary_until:
             with solitary_lock:
@@ -194,44 +197,44 @@ class SolitaryState:
             EventLogger().log(inmate.id, "solitary_release", "cell_block")
             print(f"  [RELEASED]  {inmate.name} out of solitary.")
         return "idle"
- 
- 
+
+
 class ParoleState:
     _BLOCKED = {"fight", "smuggle", "escape"}
- 
+
     def choose_action(self, inmate):
         a = FreeState().choose_action(inmate)
         return "idle" if a in self._BLOCKED else a
- 
- 
+
+
 class RiotState:
     def choose_action(self, inmate):
         return random.choice(["fight", "loot", "idle"])
- 
- 
+
+
 class InfirmaryState:
     def choose_action(self, inmate):
         if time.time() >= inmate.recovery_until:
             inmate.set_state(FreeState())
             _enter_loc(inmate, "cell_block")
         return "idle"
- 
- 
+
+
 # ── DESIGN PATTERN 3: CHAIN OF RESPONSIBILITY ─────────────────────────────────
- 
+
 class FightHandler:
     def __init__(self):
         self._next = None
- 
+
     def set_next(self, h):
         self._next = h
         return h
- 
+
     def handle(self, winner, loser, ctx):
         if self._next:
             self._next.handle(winner, loser, ctx)
- 
- 
+
+
 class KillHandler(FightHandler):
     def handle(self, winner, loser, ctx):
         if random.random() < 0.05 + (0.05 if ctx.get("armed") else 0):
@@ -242,8 +245,8 @@ class KillHandler(FightHandler):
             print(f"    [KILLED]    {loser.name} killed by {winner.name}.")
             return
         super().handle(winner, loser, ctx)
- 
- 
+
+
 class InjuryHandler(FightHandler):
     def handle(self, winner, loser, ctx):
         if not ctx.get("done") and random.random() < 0.20:
@@ -251,29 +254,29 @@ class InjuryHandler(FightHandler):
             ctx["done"] = True
             return
         super().handle(winner, loser, ctx)
- 
- 
+
+
 class SolitaryHandler(FightHandler):
     def handle(self, winner, loser, ctx):
         if not ctx.get("done") and random.random() < 0.45:
             _to_solitary(loser, random.randint(20, 40), "lost_fight")
         super().handle(winner, loser, ctx)
- 
- 
+
+
 class SentenceHandler(FightHandler):
     def handle(self, winner, loser, ctx):
         if random.random() < 0.20:
             n = random.randint(1, 5)
             winner.sentence_days += n
             EventLogger().log(winner.id, "sentence_added", outcome=f"+{n}d")
- 
- 
+
+
 _chain = KillHandler()
 _chain.set_next(InjuryHandler()).set_next(SolitaryHandler()).set_next(SentenceHandler())
 FIGHT_CHAIN = _chain
 
 
-#DESIGN PATTERN 4: PROXY
+# DESIGN PATTERN 4: PROXY
 
 class LocationAccess:
     def enter(self, inmate, loc_name):
@@ -307,7 +310,7 @@ class GuardProxy(LocationAccess):
                 break
 
         if guard:
-            if guard.bribed:
+            if inmate.id in guard.bribed_by:  # only pass if this specific inmate bribed this guard
                 EventLogger().log(inmate.id, "bribed_entry", loc_name, guard.name)
             elif not guard.corrupt:
                 _inspect(guard, inmate)
@@ -318,6 +321,7 @@ class GuardProxy(LocationAccess):
 
 
 PROXY = GuardProxy()
+
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -332,9 +336,9 @@ def _upd_rep(inmate, delta):
 
 def _transfer(giver, receiver, item):
     if giver.id < receiver.id:
-        a,b = giver, receiver
+        a, b = giver, receiver
     else:
-        a,b = receiver, giver
+        a, b = receiver, giver
     with a.inv_lock:
         with b.inv_lock:
             if item in giver.inventory:
@@ -399,7 +403,7 @@ def _inspect(guard, inmate):
         with inmate.inv_lock:
             if "cash" in inmate.inventory:
                 inmate.inventory.remove("cash")
-        guard.bribed = True
+        guard.bribed_by.add(inmate.id)  # add this inmate specifically
         guard.bribe_until = time.time() + random.uniform(20, 60)
         EventLogger().log(inmate.id, "bribe", guard.current_loc, guard.name)
         print(f"    [BRIBE]     {inmate.name} bribed {guard.name}.")
@@ -426,9 +430,9 @@ def _resolve_fight(attacker, defender, reason="fight"):
         return
 
     dur = random.uniform(2.0, 6.0)
-    t0  = time.time()
+    t0 = time.time()
     time.sleep(dur)
-    ms  = int((time.time() - t0) * 1000)
+    ms = int((time.time() - t0) * 1000)
 
     armed_atk = any(x in WEAPONS for x in attacker.inventory)
     armed_def = any(x in WEAPONS for x in defender.inventory)
@@ -436,12 +440,12 @@ def _resolve_fight(attacker, defender, reason="fight"):
     d_score = defender.reputation + (0.2 if armed_def else 0) + random.random() * 0.4
 
     if a_score >= d_score:
-        w,l = attacker, defender
+        w, l = attacker, defender
     else:
-        w,l = defender, attacker
+        w, l = defender, attacker
 
     if w.id < l.id:
-        f,s = w, l
+        f, s = w, l
     else:
         f, s = l, w
 
@@ -458,23 +462,26 @@ def _resolve_fight(attacker, defender, reason="fight"):
 
 
 # ── INMATE ACTIONS ────────────────────────────────────────────────────────────
- 
+
 def _act_move(i):
     dest = random.choice(list(locs.keys()))
     if dest != i.current_loc and _enter_loc(i, dest):
         EventLogger().log(i.id, "move", dest)
- 
+
+
 def _act_work(i):
     time.sleep(random.uniform(1, 3))
     i.sentence_days = max(0, i.sentence_days - 1)
     EventLogger().log(i.id, "work", i.current_loc)
- 
+
+
 def _act_eat(i):
     if not _enter_loc(i, "cafeteria"):
         return
     time.sleep(random.uniform(1, 2))
     EventLogger().log(i.id, "eat", "cafeteria")
- 
+
+
 def _act_shower(i):
     if not _enter_loc(i, "showers"):
         return
@@ -486,7 +493,8 @@ def _act_shower(i):
     else:
         EventLogger().log(i.id, "shower", "showers")
     _enter_loc(i, "cell_block")
- 
+
+
 def _act_trade(i):
     targets = _nearby(i.current_loc, i.id)
     if targets and i.inventory:
@@ -495,7 +503,8 @@ def _act_trade(i):
         if _transfer(i, t, item):
             EventLogger().log(i.id, "trade", i.current_loc, f"{item}->{t.name}")
             print(f"   [TRADE]     {i.name} -> {t.name}: {item}")
- 
+
+
 def _act_gamble(i):
     targets = _nearby(i.current_loc, i.id)
     if not targets:
@@ -508,7 +517,8 @@ def _act_gamble(i):
     else:
         i.debt += stake
         EventLogger().log(i.id, "gamble", outcome=f"lost,{stake}")
- 
+
+
 def _act_pay_debt(i):
     p = None
     for x in ("cash", "tobacco"):
@@ -523,12 +533,14 @@ def _act_pay_debt(i):
         EventLogger().log(i.id, "pay_debt", outcome=p)
     else:
         _upd_rep(i, -0.02)
- 
+
+
 def _act_fight(i):
     t = _nearby(i.current_loc, i.id)
     if t:
         _resolve_fight(i, random.choice(t), "spontaneous")
- 
+
+
 def _act_smuggle(i):
     corrupt_here = any(g.corrupt and g.current_loc == i.current_loc for g in guards.values())
     if random.random() < (0.55 if corrupt_here else 0.30):
@@ -537,7 +549,8 @@ def _act_smuggle(i):
             i.inventory.append(item)
         EventLogger().log(i.id, "smuggle", outcome=item)
         print(f"    [SMUGGLE]   {i.name}: {item}")
- 
+
+
 def _act_escape(i):
     with i.inv_lock:
         prob = 0.04 + (0.10 if "lockpick" in i.inventory else 0) + i.reputation * 0.05
@@ -551,14 +564,16 @@ def _act_escape(i):
         _to_solitary(i, random.randint(40, 80), "escape_attempt")
         EventLogger().log(i.id, "escape", outcome="caught")
         print(f"    [ESCAPE]    {i.name}: caught.")
- 
+
+
 def _act_loot(i):
     for t in _nearby(i.current_loc, i.id):
         if t.inventory and random.random() < 0.3:
             _transfer(t, i, random.choice(t.inventory))
             EventLogger().log(i.id, "riot_loot", outcome=t.name)
             break
- 
+
+
 ACTIONS = {
     "move": _act_move,
     "work": _act_work,
@@ -573,7 +588,6 @@ ACTIONS = {
     "loot": _act_loot,
     "idle": lambda i: None,
 }
- 
 
 
 # ── THREAD FUNCTIONS ──────────────────────────────────────────────────────────
@@ -606,8 +620,9 @@ def guard_thread(guard):
     print(f"  [SPAWN]   Guard {guard.name} | corrupt={guard.corrupt}")
 
     while not shutdown.is_set():
-        if guard.bribed and time.time() > guard.bribe_until:
-            guard.bribed = False
+        if guard.bribe_until and time.time() > guard.bribe_until:
+            guard.bribed_by.clear()  # all bribes expire together
+            guard.bribe_until = 0.0
             EventLogger().log(None, "bribe_expired", guard.current_loc)
 
         guard.current_loc = random.choice(list(locs.keys()))
@@ -623,7 +638,7 @@ def guard_thread(guard):
                         b.inventory.append(item)
                     EventLogger().log(b.id, "guard_smuggle", guard.current_loc, f"{item}|{guard.name}")
                     print(f"  [CORRUPT]  {guard.name} smuggled {item} to {b.name}.")
-        elif not guard.bribed:
+        elif not guard.bribed_by:
             loc = locs.get(guard.current_loc)
             if loc:
                 for iid in list(loc.occupants):
@@ -661,9 +676,9 @@ def gang_thread(gang):
                 tgt = random.choice(rivals)
                 win = random.random() < 0.5 + min(0.2, 0.05 * len(members))
                 dur = random.uniform(2.0, 6.0)
-                t0  = time.time()
+                t0 = time.time()
                 time.sleep(dur)
-                ms  = int((time.time() - t0) * 1000)
+                ms = int((time.time() - t0) * 1000)
                 EventLogger().log(atk.id, "gang_fight", atk.current_loc, f"win={win},t={tgt.name}", ms)
                 print(f"  [GANG]     {gang.name} vs {tgt.name}: {'WIN' if win else 'LOSS'} ({ms}ms)")
                 if win:
@@ -709,13 +724,12 @@ def gang_thread(gang):
     print(f"  [EXIT]    Gang {gang.name}")
 
 
-
 def scheduler_thread():
     global riot_active, lockdown
     print("  [SPAWN]   Scheduler")
     log = EventLogger()
     evts = ["riot", "lockdown", "inspection", "visitation", "parole", "arrival"]
-    wts = [0.15,    0.10,       0.25,         0.20,        0.15,     0.15]
+    wts = [0.15, 0.10, 0.25, 0.20, 0.15, 0.15]
 
     while not shutdown.is_set():
         time.sleep(random.uniform(15, 30))
@@ -743,7 +757,7 @@ def scheduler_thread():
             print(f"\n  +++ LOCKDOWN ({dur:.0f}s) +++\n")
             lockdown = True
             for g in guards.values():
-                g.bribed = False
+                g.bribed_by.clear()
             log.log(None, "lockdown_start")
             time.sleep(dur)
             lockdown = False
@@ -752,7 +766,7 @@ def scheduler_thread():
         elif event == "inspection":
             print("  [EVENT]   Prison-wide inspection.")
             for g in guards.values():
-                g.bribed = False
+                g.bribed_by.clear()
             log.log(None, "inspection")
             for g in guards.values():
                 if not g.corrupt:
@@ -764,7 +778,7 @@ def scheduler_thread():
 
         elif event == "visitation":
             eli = [i for i in inmates.values()
-                     if i.alive and not isinstance(i.state, SolitaryState)]
+                   if i.alive and not isinstance(i.state, SolitaryState)]
             lucky = random.sample(eli, min(4, len(eli)))
             for i in lucky:
                 item = random.choice(CONTRABAND)
@@ -789,9 +803,9 @@ def scheduler_thread():
             eth = random.choice(ETHNICITIES)
             name = random.choice(NAMES_BY_ETH[eth]) + f"_{nid}"
             ni = Inmate(nid, name, eth,
-                          random.uniform(0.2, 0.8),
-                          random.randint(10, 40),
-                          inventory=random.sample(CONTRABAND, random.randint(0, 2)))
+                        random.uniform(0.2, 0.8),
+                        random.randint(10, 40),
+                        inventory=random.sample(CONTRABAND, random.randint(0, 2)))
             inmates[nid] = ni
             threading.Thread(target=inmate_thread, args=(ni,), daemon=True, name=f"i{nid}").start()
             log.log(nid, "new_arrival", outcome=f"rep={ni.reputation:.2f}")
@@ -845,8 +859,8 @@ def build_world():
             i, name, eth,
             random.uniform(0.0, 1.0),
             random.randint(10, 60),
-            gang_id = gid,
-            inventory = random.sample(CONTRABAND, random.randint(0, 2)),
+            gang_id=gid,
+            inventory=random.sample(CONTRABAND, random.randint(0, 2)),
         )
 
     for i in range(NUM_GUARDS):
@@ -867,8 +881,8 @@ def verify():
     total = q("SELECT COUNT(*) FROM events WHERE event_type IN"
               "('fight','gang_fight') AND duration_ms IS NOT NULL")[0][0]
     bad = q("SELECT COUNT(*) FROM events WHERE event_type IN"
-              "('fight','gang_fight') AND duration_ms IS NOT NULL"
-              " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
+            "('fight','gang_fight') AND duration_ms IS NOT NULL"
+            " AND (duration_ms < 2000 OR duration_ms > 6000)")[0][0]
     if bad == 0:
         print(f"\n[1] Fight 2-6 s   -> {total} fights -> PASS")
     else:
@@ -880,7 +894,6 @@ def verify():
         print("[2] Capacity      -> PASS")
     else:
         print(f"[2] Capacity      -> FAIL {viol}")
-
 
     early = q("""
         SELECT COUNT(*) FROM events s
@@ -910,9 +923,9 @@ def verify():
 
 def summary():
     q = EventLogger().query
-    print(f"\n{'─'*55}")
-    print(f"  SUMMARY  ({SIM_DURATION}s = {SIM_DURATION//DAY_LEN} prison days)")
-    print(f"{'─'*55}")
+    print(f"\n{'─' * 55}")
+    print(f"  SUMMARY  ({SIM_DURATION}s = {SIM_DURATION // DAY_LEN} prison days)")
+    print(f"{'─' * 55}")
 
     print(f"\n  {'Event':<28} {'Count':>6}")
     print("  " + "─" * 35)
@@ -934,7 +947,7 @@ def summary():
     for g in gangs.values():
         print(f"{g.name:<26} treasury={g.treasury:>3} members={len(g.members)}")
 
-    print(f"\n  Full log -> {DB_PATH}\n{'─'*55}")
+    print(f"\n  Full log -> {DB_PATH}\n{'─' * 55}")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -960,8 +973,8 @@ def main():
         threads.append(threading.Thread(target=guard_thread, args=(g,), daemon=True, name=f"guard-{g.id}"))
     for g in gangs.values():
         threads.append(threading.Thread(target=gang_thread, args=(g,), daemon=True, name=f"gang-{g.id}"))
-    threads.append(threading.Thread(target=scheduler_thread,   daemon=True, name="sched"))
-    threads.append(threading.Thread(target=monitor_thread,     daemon=True, name="cap"))
+    threads.append(threading.Thread(target=scheduler_thread, daemon=True, name="sched"))
+    threads.append(threading.Thread(target=monitor_thread, daemon=True, name="cap"))
     threads.append(threading.Thread(target=rep_monitor_thread, daemon=True, name="rep"))
 
     for t in threads:
